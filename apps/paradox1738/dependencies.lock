@@ -1,0 +1,31 @@
+dependencies:
+  espressif/libsodium:
+    component_hash: 36e9832f40c909c0a9135a3e775fcbdd7a2a13d47a1c052ee5b21499eb3eddb5
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.20
+  espressif/mdns:
+    component_hash: 46ee81d32fbf850462d8af1e83303389602f6a6a9eddd2a55104cb4c063858ed
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.1.0
+  idf:
+    source:
+      type: idf
+    version: 5.2.0
+direct_dependencies:
+- espressif/libsodium
+- espressif/mdns
+manifest_hash: 0c5d0f24a48a7bdc29014e991fd9e748f23d0a0761c541f782ebe3d67e7db2c5
+target: esp32
+version: 2.0.0

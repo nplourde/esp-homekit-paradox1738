@@ -1,0 +1,12 @@
+# ESP-IDF generated files
+**/build/
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+
+# Local editor and host files
+.vscode/
+**/.vscode/
+.DS_Store
+*.pyc
+__pycache__/
