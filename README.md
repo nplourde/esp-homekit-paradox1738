@@ -14,7 +14,7 @@ The project is a work in progress.
 Clone this repository and initialize its submodules:
 
 ```sh
-git clone --recurse-submodules https://github.com/nplourde/esp-homekit-paradox.git
+git clone --recurse-submodules https://github.com/nplourde/esp-homekit-paradox1738.git
 ```
 
 For an existing checkout:
