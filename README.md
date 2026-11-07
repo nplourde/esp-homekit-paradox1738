@@ -5,7 +5,7 @@ The project is a work in progress.
 
 ## Dependencies
 
-- ESP-IDF v5.2.0, installed separately and activated using Espressif's
+- ESP-IDF v5.5.6, installed separately and activated using Espressif's
   `export.sh` (or `export.bat` on Windows). The project does not vendor
   ESP-IDF.
 - The [ESP HomeKit SDK](https://github.com/nplourde/esp-homekit-sdk), included
@@ -25,7 +25,7 @@ git submodule update --init --recursive
 
 ## Build
 
-Activate the ESP-IDF v5.2.0 environment, then build the ESP32 project:
+Activate the ESP-IDF v5.5.6 environment, then build the ESP32 project:
 
 ```sh
 cd apps/paradox1738
