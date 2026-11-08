@@ -39,3 +39,11 @@ not tracked. Project defaults are kept in `apps/paradox1738/sdkconfig.defaults`.
 
 The HomeKit SDK path can be overridden with the `HOMEKIT_PATH` environment
 variable if needed; by default it points to the checked-out submodule.
+
+## Roadmap
+
+The refactor plan is tracked in [TODO.md](TODO.md): nine milestones, from the
+test harness through the multi-zone HomeKit hub, SoftAP provisioning and the web
+server. Each milestone lists its work items and the validation tests that must
+pass before it counts as done. Test IDs (`T4.5`, `T7.7`, ...) are stable, so use
+them in commit messages and issue threads.
