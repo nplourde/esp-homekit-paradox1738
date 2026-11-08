@@ -17,12 +17,12 @@ Every milestone lists the work items it contains **and** the tests that must pas
 
 | # | Milestone | Work items | Tests | Status |
 |---|---|---|---|---|
-| M0 | Test harness bootstrap | 1 | 4 | [ ] |
+| M0 | Test harness bootstrap | 1 | 4 | [x] |
 | M1 | Protocol core verified off-device | 2 | 6 | [ ] |
 | M2 | State model and persisted config | 2 | 6 | [ ] |
 | M3 | HomeKit hub exposes all accessories | 4 | 7 | [ ] |
 | M4 | SoftAP provisioning works without BLE | 2 | 6 | [ ] |
-| M5 | Authenticated web server | 2 | 8 | [ ] |
+| M5 | Authenticated web server | 2 | 9 | [ ] |
 | M6 | Web APIs for config, status, log, debug | 4 | 8 | [ ] |
 | M7 | Web UI and firmware update | 2 | 7 | [ ] |
 | M8 | Integrated release on real hardware | 5 | 7 | [ ] |
@@ -32,7 +32,7 @@ Every milestone lists the work items it contains **and** the tests that must pas
 - [ ] `hk-bridge-skeleton` — Rebuilding the HomeKit bridge accessory
 - [ ] `nvs-config` — Adding NVS-backed configuration store
 - [ ] `softap-provisioning` — Switching provisioning to SoftAP
-- [ ] `test-harness` — Setting up the test harness
+- [ ] `uart-framing` — Rewriting the Paradox UART frame decoder
 - [ ] `web-server-core` — Adding the embedded web server
 
 ## Hard gates
@@ -50,7 +50,7 @@ A repeatable way to run tests: host-side Unity unit tests compiled with gcc agai
 
 ### Work items
 
-- [ ] `test-harness` — Setting up the test harness
+- [x] `test-harness` — Setting up the test harness
   Create test/host/ with a Makefile that compiles the vendored Unity 2.6.0 sources from
   /home/nicolas/Source/esp-idf/components/unity/unity/src with gcc for host-side unit tests of
   pure logic (frame decode, state model, config validation, JSON handlers), using
@@ -62,10 +62,10 @@ A repeatable way to run tests: host-side Unity unit tests compiled with gcc agai
 
 | # | Test | Kind | How to run | Pass criteria | Status |
 |---|---|---|---|---|---|
-| T0.1 | Host Unity harness builds and runs | host-unit | Create test/host/ with a Makefile that compiles the vendored Unity 2.6.0 sources from /home/nicolas/Source/esp-idf/components/unity/unity/src plus one trivial suite (test_smoke.c), then run: make -C test/host test | Exit code 0 and the summary line reports "1 Tests, 1 Successes, 0 Failures". No ESP-IDF headers required by the suite. | [ ] |
-| T0.2 | Single entry point fails on a broken test | build | Add a top-level Makefile target "check" that runs host tests then idf.py build. Temporarily add an intentionally failing assertion, run make check, then remove it. | make check exits non-zero and names the failing test file and line; after removal it exits 0. | [ ] |
-| T0.3 | Device smoke script captures boot log | device | Script test/device/smoke.sh flashes, hard-resets, reads /dev/ttyUSB0 at 115200 for 10 s without asserting DTR/RTS before capture, and greps the log. | Script exits 0 only when it finds "HAP Started" and "Returned from app_main()", and reports zero "Guru Meditation"/"abort()"/"E (" error lines. | [ ] |
-| T0.4 | Frame injector / simulator mode exists | device | Add a compile-time PARADOX_SIMULATOR mode that feeds recorded 4-byte frames into the decoder instead of UART2, selectable at runtime from the web debug page or a console command. Build both variants. | Both variants build clean. With simulator enabled and panel disconnected, events still appear in the log at the configured rate; with it disabled, no synthetic events appear. | [ ] |
+| T0.1 | Host Unity harness builds and runs | host-unit | make -C test/host check. Compiles the vendored Unity 2.6.0 sources from $IDF_PATH/components/unity/unity/src plus test_smoke.c with plain gcc and runs the binary. | Exit code 0 and Unity prints its summary line "N Tests F Failures I Ignored" followed by OK. No ESP-IDF headers in the suite (UNITY_INCLUDE_CONFIG_H deliberately left undefined, since IDF's unity_config.h pulls in esp_err.h/sdkconfig.h). | [x] |
+| T0.2 | Single entry point fails on a broken test | build | make check-fail builds test/host/samples/deliberate_failure.c (asserts 1 == 2) and runs it, asserting non-zero exit AND that the output names deliberate_failure.c:`<line>`. make check runs host tests, the smoke analyzer self-test, then both device builds. | make check-fail exits 0 only when the deliberate failure is reported with file and line and a non-zero status; make check exits 0 on a clean tree. | [x] |
+| T0.3 | Device smoke script captures boot log | device | test/device/smoke.sh (no --flash by default): opens the port, de-asserts DTR/RTS, pulses RTS to hard-reset EN, then reads for --seconds (default 10) at 115200 and analyses the log. --self-test exercises the analyzer on synthetic healthy/crashing/truncated/error logs with no hardware. make smoke FLASH=1 adds idf.py flash first. | Exits 0 only when "HAP Started" and "Returned from app_main()" are both present and there are zero crash markers (Guru Meditation, abort(), Stack canary, LoadProhibited, ...) and zero ESP-IDF error-level lines ("E (n) tag:"). --self-test exits 0 with all five analyzer cases correct. | [x] |
+| T0.4 | Frame injector / simulator mode exists | device | make build (simulator off) and make build-sim (CONFIG_PARADOX_SIMULATOR=y via apps/paradox1738/sdkconfig.simulator.defaults, separate -B build-sim and -D SDKCONFIG=sdkconfig.simulator). Compare xtensa-esp32-elf-strings of the two binaries. | Both variants build clean. Simulator binary contains "SIM event" and the "simulator enabled: UART2 not initialised" warning and no "Recv str"; default binary contains "Recv str" and no simulator strings. Runtime web-page/console toggle deferred to M5 when the web server exists. | [x] |
 
 ---
 
@@ -237,6 +237,7 @@ A reachable, authenticated HTTP server on port 80 that coexists with HAP (8080) 
 | T5.6 | CSRF / same-origin protection on mutating routes | security | Send a POST with Origin/Referer from a foreign host and no CSRF token, using a valid session cookie. | Rejected with 403 and no state change; the same request with the correct token succeeds. | [ ] |
 | T5.7 | Path traversal and oversized bodies blocked | security | Request /../../etc/config style paths and POST an oversized JSON body (over the documented limit) and malformed JSON. | Traversal returns 404/400 without serving files; oversized bodies are refused with 413; malformed JSON returns 400 and leaves config untouched. | [ ] |
 | T5.8 | Web server can be disabled by config | build | Set the disable option, rebuild, probe port 80. | Port 80 is closed and no httpd task is created; HAP on 8080 still works. | [ ] |
+| T5.9 | Simulator can be toggled at runtime | device | From the web debug page (or console command), enable the recorded-frame replay while the device runs, observe synthetic events arriving, then disable it and confirm events stop. | Toggling takes effect without a reboot; with the simulator off and no panel wired, no events are produced. Frames still decode to the same EventId/CategoryId as the compile-time build. | [ ] |
 
 ---
 
@@ -465,7 +466,7 @@ graph LR
 | Kind | Count | What it needs |
 |---|---|---|
 | build | 8 | idf.py build / sdkconfig inspection only |
-| device | 25 | board on `/dev/ttyUSB0` + serial capture |
+| device | 26 | board on `/dev/ttyUSB0` + serial capture |
 | host-unit | 11 | host toolchain only (`make -C test/host test`) — no hardware |
 | manual | 5 | a phone on the bridge network |
 | manual-homekit | 2 | iPhone with the Home app and a paired bridge |

@@ -40,6 +40,32 @@ not tracked. Project defaults are kept in `apps/paradox1738/sdkconfig.defaults`.
 The HomeKit SDK path can be overridden with the `HOMEKIT_PATH` environment
 variable if needed; by default it points to the checked-out submodule.
 
+## Testing
+
+From the repository root (with the ESP-IDF environment activated):
+
+```sh
+make check        # host unit tests, boot-log analyzer self-test, both device builds
+make check-fail   # prove a failing test is reported with file and line
+make smoke        # reset the board and check its boot log (no flashing)
+make smoke FLASH=1  # flash first - overwrites whatever firmware is running
+```
+
+- `test/host/` — Unity unit tests for pure logic, compiled with the host `gcc`
+  against the Unity sources vendored in ESP-IDF. They must not include any
+  ESP-IDF header; anything needing the RTOS, UART driver or NVS belongs in a
+  device test. Set `IDF_PATH` if the SDK is not at `~/Source/esp-idf`.
+  Sanitizers are opt-in (`make -C test/host check SAN=1`) because they need
+  `libasan`/`libubsan` to be installed.
+- `test/device/smoke.sh` — hard-resets the board through the CP2102 auto-reset
+  circuit, captures the boot log, and fails on a missing `HAP Started` /
+  `Returned from app_main()`, a crash marker, or any error-level log line.
+  `--self-test` checks the analyzer with no hardware attached.
+- `make build-sim` builds with `CONFIG_PARADOX_SIMULATOR=y`, which replays
+  recorded panel frames instead of reading UART2 so the firmware can be run with
+  no alarm panel wired up. Never flash a simulator build and expect it to report
+  real sensor states.
+
 ## Roadmap
 
 The refactor plan is tracked in [TODO.md](TODO.md): nine milestones, from the

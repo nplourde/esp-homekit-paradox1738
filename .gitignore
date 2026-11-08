@@ -1,8 +1,11 @@
 # ESP-IDF generated files
 **/build/
+**/build-sim/
 **/managed_components/
 **/sdkconfig
 **/sdkconfig.old
+**/sdkconfig.simulator
+**/sdkconfig.simulator.old
 
 # Local editor and host files
 .vscode/
@@ -10,3 +13,6 @@
 .DS_Store
 *.pyc
 __pycache__/
+
+# Host unit-test artifacts
+test/host/build/

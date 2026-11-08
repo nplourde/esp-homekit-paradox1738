@@ -1,0 +1,7 @@
+# Overlay for the recorded-panel simulator build (T0.4).
+#
+#   idf.py -B build-sim -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.simulator.defaults" build
+#
+# Use `make build-sim` from the repo root. Never flash a simulator build and
+# expect it to report real sensor states.
+CONFIG_PARADOX_SIMULATOR=y

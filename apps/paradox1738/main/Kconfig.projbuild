@@ -23,4 +23,17 @@ menu "Example Configuration"
         help
             Setup id to be used for HomeKot pairing, if hard-coded setup code is enabled.
 
+    menu "Paradox 1738 link"
+
+        config PARADOX_SIMULATOR
+            bool "Replay recorded panel frames instead of reading UART2"
+            default n
+            help
+                Feed the event decoder from a table of frames captured from the
+                real panel, and leave UART2 unused. Lets the firmware be run and
+                smoke-tested with no alarm panel wired up. Do not enable in a
+                build that is expected to report real sensor states.
+
+    endmenu
+
 endmenu
