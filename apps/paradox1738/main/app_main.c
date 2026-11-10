@@ -1,8 +1,10 @@
 #include <stdio.h>
 #include <string.h>
+#include "sdkconfig.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <esp_log.h>
+#include <esp_system.h>
 
 #include <hap.h>
 #include <hap_apple_servs.h>
@@ -15,11 +17,14 @@
 #include <app_hap_setup_payload.h>
 
 #include "paradox1738.h"
+#include "paradox_config_store.h"
+#include "paradox_state.h"
 
 /* Comment out the below line to disable Firmware Upgrades */
 #define CONFIG_FIRMWARE_SERVICE
 
 static const char *TAG = "HAP motionsensor";
+static paradox_config_t app_config;
 
 #define MOTIONSENSOR_TASK_PRIORITY  1
 #define MOTIONSENSOR_TASK_STACKSIZE 4 * 1024
@@ -85,6 +90,50 @@ static int sensor_identify(hap_acc_t *ha)
 /*The main thread for handling the Accessory */
 static void motionsensor_thread_entry(void *arg)
 {
+    if (!paradox_state_init()) {
+        ESP_LOGE(TAG, "Failed to initialize the Paradox state model");
+        vTaskDelete(NULL);
+        return;
+    }
+
+#ifdef CONFIG_PARADOX_CONFIG_SELFTEST
+    bool restart_required;
+    bool config_test_passed;
+    esp_err_t config_test_err = paradox_config_store_selftest_step(
+        &restart_required, &config_test_passed);
+    if (config_test_err != ESP_OK) {
+        ESP_LOGE(TAG, "Config NVS self-test failed: %s",
+                 esp_err_to_name(config_test_err));
+        vTaskDelete(NULL);
+        return;
+    }
+    if (restart_required) {
+        esp_restart();
+    }
+    if (!config_test_passed) {
+        ESP_LOGE(TAG, "Config NVS self-test did not complete");
+        vTaskDelete(NULL);
+        return;
+    }
+#endif
+
+    paradox_config_load_status_t config_status;
+    esp_err_t config_err = paradox_config_store_load(&app_config, &config_status);
+    if (config_err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to load Paradox config from NVS: %s",
+                 esp_err_to_name(config_err));
+        vTaskDelete(NULL);
+        return;
+    }
+    if (config_status == PARADOX_CONFIG_LOAD_DEFAULTS) {
+        ESP_LOGI(TAG, "Using default Paradox config");
+    } else if (config_status == PARADOX_CONFIG_LOAD_MIGRATED) {
+        ESP_LOGI(TAG, "Migrated Paradox config to schema %u",
+                 (unsigned)PARADOX_CONFIG_SCHEMA_VERSION);
+    } else {
+        ESP_LOGI(TAG, "Loaded Paradox config from NVS");
+    }
+
     /*
     *    Adding Bridge Accessory
     */
@@ -199,7 +248,14 @@ static void motionsensor_thread_entry(void *arg)
 #endif
 
     /* Initialize the Paradox1738 Hardware */
+#ifdef CONFIG_PARADOX_LINK_SELFTEST
+    /* T1.6: proves paradox1738_deinit() links and is safe to call twice. */
+    if (!paradox1738_link_selftest()) {
+        ESP_LOGE(TAG, "Paradox link self-test failed");
+    }
+#else
     paradox1738_init();
+#endif
 
     /* Register a common button for reset Wi-Fi network and reset to factory.
      */

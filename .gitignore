@@ -6,6 +6,12 @@
 **/sdkconfig.old
 **/sdkconfig.simulator
 **/sdkconfig.simulator.old
+**/build-selftest/
+**/sdkconfig.selftest
+**/sdkconfig.selftest.old
+**/build-configtest/
+**/sdkconfig.configtest
+**/sdkconfig.configtest.old
 
 # Local editor and host files
 .vscode/

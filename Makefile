@@ -6,6 +6,8 @@
 #   make host-test    # host unit tests only
 #   make build        # idf.py build only
 #   make build-sim    # idf.py build with the recorded-panel simulator (T0.4)
+#   make build-selftest # idf.py build with the link init/deinit self-test (T1.6)
+#   make build-configtest # idf.py build with the NVS config self-test (M2)
 #   make smoke        # reset + boot-log smoke test (T0.3); FLASH=1 to flash first
 
 APP          := apps/paradox1738
@@ -15,7 +17,7 @@ PORT         ?= /dev/ttyUSB0
 # IDF_PATH must be exported for idf.py; point it at the local checkout.
 export IDF_PATH ?= $(HOME)/Source/esp-idf
 
-.PHONY: check check-fail host-test build build-sim flash monitor smoke clean distclean
+.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke clean distclean
 
 check: host-test smoke-selftest build build-sim
 	@echo "check: PASS"
@@ -38,6 +40,18 @@ build-sim:
 	@cd $(APP) && idf.py -B build-sim \
 		-D SDKCONFIG=sdkconfig.simulator \
 		-D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.simulator.defaults" build
+
+# T1.6: same sources, but app_main() runs paradox1738_link_selftest() at boot.
+build-selftest:
+	@cd $(APP) && idf.py -B build-selftest \
+		-D SDKCONFIG=sdkconfig.selftest \
+		-D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.selftest.defaults" build
+
+# M2: isolated NVS namespace; verifies persistence and v0/corrupt fallbacks.
+build-configtest:
+	@cd $(APP) && idf.py -B build-configtest \
+		-D SDKCONFIG=sdkconfig.configtest \
+		-D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.configtest.defaults" build
 
 flash:
 	@cd $(APP) && idf.py -p $(PORT) flash

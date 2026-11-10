@@ -36,4 +36,24 @@ menu "Example Configuration"
 
     endmenu
 
+    menu "Paradox 1738 tests"
+
+        config PARADOX_LINK_SELFTEST
+            bool "Run the Paradox link init/deinit self-test at boot"
+            default n
+            help
+                Call paradox1738_link_selftest() instead of paradox1738_init(): it
+                brings the link up, calls paradox1738_deinit() twice (T1.6) and
+                re-initialises. Watch the log for "LINK SELFTEST: PASS".
+
+        config PARADOX_CONFIG_SELFTEST
+            bool "Run the Paradox config NVS self-test at boot"
+            default n
+            help
+                Use an isolated NVS namespace to test config save/reboot/load,
+                schema migration and corrupt-blob fallback. The test reboots
+                automatically between its phases.
+
+    endmenu
+
 endmenu

@@ -4,12 +4,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-typedef struct
-{
-    /* data */
-    int EventId;
-    int CategoryId;
-} paradox1738_event_t;
+#include "paradox_proto.h"
+
+/* Decoded event as delivered to the HomeKit layer. */
+typedef paradox_event_t paradox1738_event_t;
 
 
 /**
@@ -38,6 +36,37 @@ void paradox1738_deinit(void);
  * @return none
  */
 bool paradox1738_event_read(paradox1738_event_t *out_event);
+
+/**
+ * @brief copy the decoder counters (framing errors, discarded bytes, overruns)
+ *
+ * @param out_stats destination; nothing is written when NULL
+ *
+ * @return none
+ */
+void paradox1738_stats(paradox_stats_t *out_stats);
+
+/**
+ * @brief zero the decoder counters
+ *
+ * @param none
+ *
+ * @return none
+ */
+void paradox1738_stats_clear(void);
+
+/**
+ * @brief bring the link up and tear it down twice (T1.6)
+ *
+ * paradox1738_deinit() used to be declared but never implemented, which only
+ * showed up at link time. This runs init/deinit/deinit so the second call is
+ * proven harmless, and logs the result. Enabled with CONFIG_PARADOX_LINK_SELFTEST.
+ *
+ * @param none
+ *
+ * @return true when the link came up and both deinit calls were clean
+ */
+bool paradox1738_link_selftest(void);
 
 #ifdef CONFIG_PARADOX_SIMULATOR
 /* Recorded-panel replay support (see paradox_sim.c). */

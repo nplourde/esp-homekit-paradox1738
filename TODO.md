@@ -18,8 +18,8 @@ Every milestone lists the work items it contains **and** the tests that must pas
 | # | Milestone | Work items | Tests | Status |
 |---|---|---|---|---|
 | M0 | Test harness bootstrap | 1 | 4 | [x] |
-| M1 | Protocol core verified off-device | 2 | 6 | [ ] |
-| M2 | State model and persisted config | 2 | 6 | [ ] |
+| M1 | Protocol core verified off-device | 2 | 6 | [x] |
+| M2 | State model and persisted config | 2 | 6 | [x] |
 | M3 | HomeKit hub exposes all accessories | 4 | 7 | [ ] |
 | M4 | SoftAP provisioning works without BLE | 2 | 6 | [ ] |
 | M5 | Authenticated web server | 2 | 9 | [ ] |
@@ -75,14 +75,14 @@ The Paradox serial stream decodes correctly and self-heals on byte loss, proven 
 
 ### Work items
 
-- [ ] `event-decode` — Adding the event/category decode layer
+- [x] `event-decode` — Adding the event/category decode layer
   Introduce enums + a decode table for the Spectra 1738 protocol: EventId 1 Zone OK, 2 Zone Open,
   3 Partition Status, 12 Delayed-zone breach, 13 Arm, 15 Disarm, 20 Zone in alarm, 21 Fire alarm,
   22 Zone alarm restore, 23 Fire restore, 24 Special alarm (cat 2 = Fire via keys), 25 Auto zone
   shutdown, 26/27 Zone tamper/restore, 28/29 System trouble/restore. CategoryId 1-16 = zones.
   Produce a decoded event struct with class, zone, and open/closed semantics.
   *Depends on:* `test-harness`, `uart-framing`
-- [ ] `uart-framing` — Rewriting the Paradox UART frame decoder
+- [x] `uart-framing` — Rewriting the Paradox UART frame decoder
   apps/paradox1738/main/paradox1738.c: replace the current read with a resyncing 4-byte frame
   decoder (the panel stream has no framing header, so a lost byte permanently misaligns reads).
   Check the actual uart_read_bytes return length instead of assuming 4. Remove the unsafe
@@ -95,12 +95,12 @@ The Paradox serial stream decodes correctly and self-heals on byte loss, proven 
 
 | # | Test | Kind | How to run | Pass criteria | Status |
 |---|---|---|---|---|---|
-| T1.1 | Golden frame decode table | host-unit | Move the byte-decode logic into a pure function (no driver calls) and unit test it against every EventId in the reference: 1,2,3,5,6-11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30 with representative CategoryIds. Run: make -C test/host test | All vectors decode to the expected EventId, CategoryId and event class. EventId 1 maps to closed, 2 to open, 21 to fire-alarm, 23 to fire-restore. | [ ] |
-| T1.2 | CategoryId/EventId bit math matches the reference | host-unit | Feed the documented example bytes and assert EventId = data[0] >> 2 and CategoryId = ((data[0] & 3) << 4) + (data[1] >> 4), including the boundary cases where data[0] low bits are 0b11 and data[1] high nibble is 0xF. | Zone 16 (CategoryId 16) and zone 1 decode correctly; no off-by-one at the 10-bit field boundary; bits 1-4 of the 16-bit field are ignored. | [ ] |
-| T1.3 | Decoder resynchronises after a dropped byte | host-unit | Feed a valid frame, then a stream with one byte deleted mid-way, then more valid frames. Assert the error/resync counter and that the decoder returns to aligned output. | After at most one discarded frame the next decoded event matches the expected fixture; framing-error counter increments exactly once per injected corruption; no infinite loop when fewer than 4 bytes remain. | [ ] |
-| T1.4 | Short read never produces a phantom event | host-unit | Stub the read to return 0, 1, 2 and 3 bytes and call the decoder. | Each case returns "no event" without touching the caller struct, and no buffer is read past its 4-byte bound (host build uses -fsanitize=address,undefined and reports no errors). | [ ] |
-| T1.5 | No unsafe %s logging of the raw buffer | security | grep -n "%s" over the UART sources and run the host decoder under ASAN with a deliberately non-NUL-terminated 4-byte buffer. | Zero %s conversions applied to the UART buffer; frames are logged as hex bytes instead. ASAN reports no overread. | [ ] |
-| T1.6 | paradox1738_deinit implemented and idempotent | build | Call paradox1738_deinit() (declared in paradox1738.h but previously undefined) twice from a device test path. | Links without undefined reference; second call returns without crashing or double-freeing the UART driver. | [ ] |
+| T1.1 | Golden frame decode table | host-unit | Move the byte-decode logic into a pure function (no driver calls) and unit test it against every EventId in the reference: 1,2,3,5,6-11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30 with representative CategoryIds. Run: make -C test/host test | All vectors decode to the expected EventId, CategoryId and event class. EventId 1 maps to closed, 2 to open, 21 to fire-alarm, 23 to fire-restore. Decode lives in `main/paradox_proto.c`; covered by `test/host/test_decode.c` (7 tests) plus `test_simframes.c`, which replays the whole recorded simulator table through the real decoder. | [x] |
+| T1.2 | CategoryId/EventId bit math matches the reference | host-unit | Feed the documented example bytes and assert EventId = data[0] >> 2 and CategoryId = ((data[0] & 3) << 4) + (data[1] >> 4), including the boundary cases where data[0] low bits are 0b11 and data[1] high nibble is 0xF. | Zone 16 (CategoryId 16) and zone 1 decode correctly; no off-by-one at the 10-bit field boundary; bits 1-4 of the 16-bit field are ignored. | [x] |
+| T1.3 | Decoder resynchronises after a dropped byte | host-unit | Feed a valid frame, then a stream with one byte deleted mid-way, then more valid frames. Assert the error/resync counter and that the decoder returns to aligned output. | After at most one discarded frame the next decoded event matches the expected fixture; framing-error counter increments exactly once per injected corruption; no infinite loop when fewer than 4 bytes remain. | [x] |
+| T1.4 | Short read never produces a phantom event | host-unit | Stub the read to return 0, 1, 2 and 3 bytes and call the decoder. | Each case returns "no event" without touching the caller struct, and no buffer is read past its 4-byte bound (host build uses -fsanitize=address,undefined and reports no errors). | [x] |
+| T1.5 | No unsafe %s logging of the raw buffer | security | grep -n "%s" over the UART sources and run the host decoder under ASAN with a deliberately non-NUL-terminated 4-byte buffer. | Zero %s conversions applied to the UART buffer; frames are logged as hex bytes instead. ASAN reports no overread. | [x] |
+| T1.6 | paradox1738_deinit implemented and idempotent | build | Call paradox1738_deinit() (declared in paradox1738.h but previously undefined) twice from a device test path. `make build-selftest` builds with `CONFIG_PARADOX_LINK_SELFTEST=y` (via `sdkconfig.selftest.defaults`, separate `-B build-selftest`); app_main() then runs `paradox1738_link_selftest()`, which inits, calls deinit twice and re-inits. Flashed to `/dev/ttyUSB0`; boot log showed `LINK SELFTEST: PASS (deinit implemented and idempotent)`. | Links without undefined reference; second call returns without crashing or double-freeing the UART driver. | [x] |
 
 ---
 
@@ -110,28 +110,30 @@ One authoritative, thread-safe state model for zones 1-16 plus fire, and a versi
 
 ### Work items
 
-- [ ] `nvs-config` — Adding NVS-backed configuration store
+- [x] `nvs-config` — Adding NVS-backed configuration store
   Persist a config blob in NVS: per-zone enabled flag, HomeKit service type
   (contact/motion/smoke/leak), user-visible name, plus global flags (panel debug on/off, web auth
-  hash). Include a schema version with defaults + migration, and a load/save API. Config changes
-  require a reboot to rebuild the HomeKit accessory set.
-- [ ] `zone-state-model` — Building the central zone/fire state model
+  hash). Schema v1 uses a stable byte encoding; v0 migrates by defaulting the new auth hash.
+  Defaults enable all zones as contact sensors named "Zone 1" through "Zone 16". The NVS load/save
+  API validates values and falls back with a warning for corrupt or unsupported blobs. Config
+  changes require a reboot to rebuild the HomeKit accessory set.
+- [x] `zone-state-model` — Building the central zone/fire state model
   New module holding authoritative state for zones 1-16 plus the fire alarm: open/closed, in-
   alarm, tamper, bypassed, last-change timestamp, and fire alarm/restored. Thread-safe (FreeRTOS
-  mutex or queue-based owner task) so the UART reader, HAP loop, and web server can all touch it.
-  Single source of truth that HomeKit and the web UI both read.
+  mutex on device; pthread mutex on host) with atomic snapshots and callbacks only on real changes.
+  UART/HAP/web integrations consume this shared API in their respective milestones.
   *Depends on:* `event-decode`, `test-harness`
 
 ### Validation tests
 
 | # | Test | Kind | How to run | Pass criteria | Status |
 |---|---|---|---|---|---|
-| T2.1 | State model is thread-safe | host-unit | Compile the state module on the host and hammer it from 4 pthreads (2 writers toggling zones, 2 readers snapshotting) for 100k iterations under -fsanitize=thread. | No data-race or deadlock reports; every reader snapshot is internally consistent (no mixed old/new values for one zone). | [ ] |
-| T2.2 | Zone index bounds and invalid input rejected | host-unit | Call the setters with zone index 0, 16, 17, -1 and with an unknown event class. | Out-of-range indexes return an error code and leave state untouched; valid range is exactly 1-16. | [ ] |
-| T2.3 | State change notifications fire once per real change | host-unit | Send the same "zone open" event twice, then "zone closed". Count observer callbacks. | Exactly two notifications for the two real transitions; the duplicate produces none. | [ ] |
-| T2.4 | NVS config round-trip survives reboot | device | Write a non-default config (rename zone 3, set zone 7 type to motion, disable zone 12), reboot the board, read it back over the API or a log dump. | Values after reboot are byte-identical to what was written; untouched zones keep defaults. | [ ] |
-| T2.5 | Config schema versioning and migration | device | Flash a build with schema version N, then one with version N+1 that adds a field (or hand-write an old-version blob). Boot the newer build. | Loader detects the version, keeps existing values, fills new fields with documented defaults, and does not wipe the partition; a corrupt blob falls back to defaults and logs a warning. | [ ] |
-| T2.6 | Config validation rejects bad values | host-unit | Attempt to set a zone type outside the supported enum, a name longer than the HAP string limit (64 chars), and an empty name. | Each is rejected with an error code; a too-long name is either truncated with a warning or rejected, never silently overflowed. | [ ] |
+| T2.1 | State model is thread-safe | host-unit | `make -C test/host check SAN=thread CC=gcc-16`; 2 pthread writers each toggle one zone 100k times while 2 readers snapshot. | No data-race or deadlock reports; snapshots preserve the zone/open/timestamp invariants. | [x] |
+| T2.2 | Zone index bounds and invalid input rejected | host-unit | `test/host/test_state.c` exercises indexes 0, 16, 17, -1, an out-of-range fire category, and an unknown event class. | Out-of-range indexes return an error code and leave state untouched; valid zone range is exactly 1-16. | [x] |
+| T2.3 | State change notifications fire once per real change | host-unit | Send zone-open twice, then zone-closed; count observer callbacks. | Exactly two notifications for the two real transitions; the duplicate produces none. | [x] |
+| T2.4 | NVS config round-trip survives reboot | device | `make build-configtest`, flash it, then capture boot with `test/device/smoke.sh --port /dev/ttyUSB0 --seconds 45 --allow-errors`. Isolated `pconfig_test` namespace writes Zone 3 name, Zone 7 motion type and disables Zone 12; the test reboots and verifies every field and all untouched defaults. | Boot log reports `CONFIG SELFTEST: PASS`; production `paradox` namespace is not modified. | [x] |
+| T2.5 | Config schema versioning and migration | device | Same isolated device self-test writes a v0 blob, reboots into the v1 loader, then tests a corrupt blob on another reboot. | Migration preserves configured fields and defaults the new hash; corrupt data logs a warning and falls back to defaults without erasing NVS. Device log reports `CONFIG SELFTEST: PASS`. | [x] |
+| T2.6 | Config validation rejects bad values | host-unit | `make -C test/host check` runs `test_config.c` with invalid service type, a 65-character name and an empty name. | Each invalid value is rejected with an explicit result; valid 64-character names fit without overflow. | [x] |
 
 ---
 
@@ -471,4 +473,3 @@ graph LR
 | manual | 5 | a phone on the bridge network |
 | manual-homekit | 2 | iPhone with the Home app and a paired bridge |
 | security | 8 | board + `curl`, plus a `strings` scan of the image |
-
