@@ -5,6 +5,7 @@
 #include <freertos/task.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 
 #include <hap.h>
 #include <hap_apple_servs.h>
@@ -76,15 +77,57 @@ static int bridge_identify(hap_acc_t *ha)
     return HAP_SUCCESS;
 }
 
+static hap_char_t *g_zone_contact_chars[PARADOX_MAX_ZONES];
+static hap_char_t *g_zone_fault_chars[PARADOX_MAX_ZONES];
+static hap_char_t *g_zone_tampered_chars[PARADOX_MAX_ZONES];
+static hap_char_t *g_fire_smoke_char;
+static hap_char_t *g_fire_fault_char;
+static hap_char_t *g_fire_tampered_char;
 
-/* Mandatory identify routine for the accessory.
- * In a real accessory, something like LED blink should be implemented
- * got visual identification
- */
-static int sensor_identify(hap_acc_t *ha)
+static void update_hap_uint8(hap_char_t *hc, uint8_t value)
 {
-    ESP_LOGI(TAG, "Accessory identified");
-    return HAP_SUCCESS;
+    if (!hc) {
+        return;
+    }
+    hap_val_t val = { .i = value };
+    hap_char_update_val(hc, &val);
+}
+
+static void update_zone_hap_state(int zone_id, const paradox_zone_state_t *zone)
+{
+    if (zone_id < 1 || zone_id > PARADOX_MAX_ZONES) {
+        return;
+    }
+    int idx = zone_id - 1;
+    update_hap_uint8(g_zone_contact_chars[idx], zone->open ? 1 : 0);
+    update_hap_uint8(g_zone_fault_chars[idx], zone->in_alarm ? 1 : 0);
+    update_hap_uint8(g_zone_tampered_chars[idx], zone->tampered ? 1 : 0);
+}
+
+static void update_fire_hap_state(const paradox_state_snapshot_t *snapshot)
+{
+    if (!snapshot) {
+        return;
+    }
+    update_hap_uint8(g_fire_smoke_char, snapshot->fire_alarm ? 1 : 0);
+    update_hap_uint8(g_fire_fault_char, snapshot->fire_alarm ? 0 : 0);
+    update_hap_uint8(g_fire_tampered_char, snapshot->fire_restored ? 0 : 0);
+}
+
+static void paradox_hap_state_changed(paradox_state_change_kind_t kind,
+                                     int zone_id,
+                                     const paradox_state_snapshot_t *snapshot,
+                                     void *context)
+{
+    (void)context;
+    if (!snapshot) {
+        return;
+    }
+    if (kind == PARADOX_STATE_CHANGE_ZONE) {
+        update_zone_hap_state(zone_id, &snapshot->zones[zone_id - 1]);
+    } else if (kind == PARADOX_STATE_CHANGE_FIRE) {
+        update_fire_hap_state(snapshot);
+    }
 }
 
 /*The main thread for handling the Accessory */
@@ -175,58 +218,121 @@ static void motionsensor_thread_entry(void *arg)
     hap_add_accessory(bridge_accessory);
 
     /*
-    *    Adding Motion Sensor Accessories
+    *    Adding Zone and Fire Accessories
     */
 
-    hap_serv_t *service;
-    // char accessory_name[12] = {0};
-    // sprintf(accessory_name, "ESP-Motion");
+    paradox_state_snapshot_t snapshot;
+    if (paradox_state_snapshot(&snapshot) != PARADOX_STATE_OK) {
+        ESP_LOGE(TAG, "Failed to read initial Paradox state snapshot");
+        goto sensor_err;
+    }
+    if (paradox_state_set_observer(paradox_hap_state_changed, NULL) != PARADOX_STATE_OK) {
+        ESP_LOGE(TAG, "Failed to register HomeKit state observer");
+        goto sensor_err;
+    }
 
-    // /* Initialise the mandatory parameters for Accessory which will be added as
-    //  * the mandatory services internally
-    //  */
-    // hap_acc_cfg_t cfg = {
-    //     .name = "Esp-MotionSensor",
-    //     .manufacturer = "Espressif",
-    //     .model = "EspMotionSensor01",
-    //     .serial_num = "abcdefg",
-    //     .fw_rev = "0.9.0",
-    //     .hw_rev = "1.0",
-    //     .pv = "1.1.0",
-    //     .identify_routine = sensor_identify,
-    //     .cid = HAP_CID_SENSOR,
-    // };
+    for (int zone_id = 1; zone_id <= PARADOX_MAX_ZONES; zone_id++) {
+        char zone_name[32];
+        if (app_config.zones[zone_id - 1].name[0] != '\0') {
+            snprintf(zone_name, sizeof(zone_name), "%s", app_config.zones[zone_id - 1].name);
+        } else {
+            snprintf(zone_name, sizeof(zone_name), "Zone %d", zone_id);
+        }
 
-    // /* Create accessory object */
-    // accessory = hap_acc_create(&cfg);
-    // if (!accessory)
-    // {
-    //     ESP_LOGE(TAG, "Failed to create accessory");
-    //     goto sensor_err;
-    // }
+        hap_acc_cfg_t zone_cfg = {
+            .name = zone_name,
+            .manufacturer = "Paradox",
+            .model = "Spectra1738-Zone",
+            .serial_num = "000000000000",
+            .fw_rev = "0.9.0",
+            .hw_rev = NULL,
+            .pv = "1.1.0",
+            .identify_routine = bridge_identify,
+            .cid = HAP_CID_SENSOR,
+        };
 
-    // /* Create the Motion Sensor Service. Include the "name" since this is a user visible service  */
-    // service = hap_serv_motion_sensor_create(false);
-    // if (!service)
-    // {
-    //     ESP_LOGE(TAG, "Failed to create Motion Sensor Service");
-    //     goto sensor_err;
-    // }
+        char serial_num[16];
+        snprintf(serial_num, sizeof(serial_num), "ZONE-%02d", zone_id);
+        zone_cfg.serial_num = serial_num;
 
-    // /* Add the optional characteristic to the Sensor Service */
-    // int ret = hap_serv_add_char(service, hap_char_name_create("ESP32 Motion Sensor"));
-    
-    // if (ret != HAP_SUCCESS)
-    // {
-    //     ESP_LOGE(TAG, "Failed to add optional characteristics to Motion Sensor");
-    //     goto sensor_err;
-    // }
-    
-    // /* Add the Service to the Accessory Object */
-    // hap_acc_add_serv(accessory, service);
+        hap_acc_t *zone_accessory = hap_acc_create(&zone_cfg);
+        if (!zone_accessory) {
+            ESP_LOGE(TAG, "Failed to create zone accessory %d", zone_id);
+            goto sensor_err;
+        }
 
-    // /* Add the Accessory to the HomeKit Database */
-    //  hap_add_bridged_accessory(accessory, hap_get_unique_aid(accessory_name));
+        hap_serv_t *zone_service = hap_serv_contact_sensor_create(snapshot.zones[zone_id - 1].open ? 1 : 0);
+        if (!zone_service) {
+            ESP_LOGE(TAG, "Failed to create contact sensor service for zone %d", zone_id);
+            hap_acc_delete(zone_accessory);
+            goto sensor_err;
+        }
+        if (hap_serv_add_char(zone_service, hap_char_name_create(zone_name)) != HAP_SUCCESS) {
+            ESP_LOGE(TAG, "Failed to add zone name for zone %d", zone_id);
+            hap_acc_delete(zone_accessory);
+            goto sensor_err;
+        }
+        if (hap_serv_add_char(zone_service, hap_char_status_fault_create(snapshot.zones[zone_id - 1].in_alarm ? 1 : 0)) != HAP_SUCCESS) {
+            ESP_LOGE(TAG, "Failed to add fault char for zone %d", zone_id);
+            hap_acc_delete(zone_accessory);
+            goto sensor_err;
+        }
+        if (hap_serv_add_char(zone_service, hap_char_status_tampered_create(snapshot.zones[zone_id - 1].tampered ? 1 : 0)) != HAP_SUCCESS) {
+            ESP_LOGE(TAG, "Failed to add tamper char for zone %d", zone_id);
+            hap_acc_delete(zone_accessory);
+            goto sensor_err;
+        }
+
+        hap_acc_add_serv(zone_accessory, zone_service);
+        g_zone_contact_chars[zone_id - 1] = hap_serv_get_char_by_uuid(zone_service, HAP_CHAR_UUID_CONTACT_SENSOR_STATE);
+        g_zone_fault_chars[zone_id - 1] = hap_serv_get_char_by_uuid(zone_service, HAP_CHAR_UUID_STATUS_FAULT);
+        g_zone_tampered_chars[zone_id - 1] = hap_serv_get_char_by_uuid(zone_service, HAP_CHAR_UUID_STATUS_TAMPERED);
+        hap_add_bridged_accessory(zone_accessory, hap_get_unique_aid(zone_name));
+    }
+
+    hap_acc_cfg_t fire_cfg = {
+        .name = "Fire Alarm",
+        .manufacturer = "Paradox",
+        .model = "Spectra1738-Fire",
+        .serial_num = "FIRE-0001",
+        .fw_rev = "0.9.0",
+        .hw_rev = NULL,
+        .pv = "1.1.0",
+        .identify_routine = bridge_identify,
+        .cid = HAP_CID_SENSOR,
+    };
+    hap_acc_t *fire_accessory = hap_acc_create(&fire_cfg);
+    if (!fire_accessory) {
+        ESP_LOGE(TAG, "Failed to create fire accessory");
+        goto sensor_err;
+    }
+
+    hap_serv_t *fire_service = hap_serv_smoke_sensor_create(snapshot.fire_alarm ? 1 : 0);
+    if (!fire_service) {
+        ESP_LOGE(TAG, "Failed to create fire service");
+        hap_acc_delete(fire_accessory);
+        goto sensor_err;
+    }
+    if (hap_serv_add_char(fire_service, hap_char_name_create("Fire Alarm")) != HAP_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to add fire accessory name");
+        hap_acc_delete(fire_accessory);
+        goto sensor_err;
+    }
+    if (hap_serv_add_char(fire_service, hap_char_status_fault_create(0)) != HAP_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to add fire status fault");
+        hap_acc_delete(fire_accessory);
+        goto sensor_err;
+    }
+    if (hap_serv_add_char(fire_service, hap_char_status_tampered_create(0)) != HAP_SUCCESS) {
+        ESP_LOGE(TAG, "Failed to add fire status tampered");
+        hap_acc_delete(fire_accessory);
+        goto sensor_err;
+    }
+    hap_acc_add_serv(fire_accessory, fire_service);
+    g_fire_smoke_char = hap_serv_get_char_by_uuid(fire_service, HAP_CHAR_UUID_SMOKE_DETECTED);
+    g_fire_fault_char = hap_serv_get_char_by_uuid(fire_service, HAP_CHAR_UUID_STATUS_FAULT);
+    g_fire_tampered_char = hap_serv_get_char_by_uuid(fire_service, HAP_CHAR_UUID_STATUS_TAMPERED);
+    hap_add_bridged_accessory(fire_accessory, hap_get_unique_aid("Fire Alarm"));
 
 #ifdef CONFIG_FIRMWARE_SERVICE
     hap_serv_t *firmware_service;
@@ -297,57 +403,15 @@ static void motionsensor_thread_entry(void *arg)
     /* Start Wi-Fi */
     app_wifi_start(portMAX_DELAY);
 
-    /* Get motion characteristic iid */
-
-/*
-    uint32_t motion_sensor_iid = 0;
-    hap_char_t *hc;
-    for (hc = hap_serv_get_first_char(service); hc; hc = hap_char_get_next(hc))
-    {
-        if (!strcmp(hap_char_get_type_uuid(hc), HAP_CHAR_UUID_MOTION_DETECTED))
-        {
-            motion_sensor_iid = hap_char_get_iid(hc);
-            continue;
+    for (;;) {
+        paradox1738_event_t event;
+        if (paradox1738_event_read(&event)) {
+            paradox_state_apply_event(&event, esp_timer_get_time() / 1000ULL);
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 
-    if(motion_sensor_iid != 0)
-    {
-        hap_char_t *hc_motion_sensor = hap_acc_get_char_by_iid(accessory, motion_sensor_iid);
-
-        paradox1738_event_t event;
-
-        while (1)
-        {
-            hap_val_t new_val;
-            
-            if(paradox1738_event_read(&event))
-            {
-                ESP_LOGI(TAG, "Recv event: %d %d", event.EventId, event.CategoryId);
-            
-                switch(event.EventId)
-                {        
-                    case 0:
-                    new_val.i = 0;
-                    break;
-                    
-                    case 1:
-                    new_val.i = 1;
-                    break;
-
-                    default:
-                    break;
-                }            
-
-                hap_char_update_val(hc_motion_sensor, &new_val);
-            }
-        }      
-    }
-    else
-    {
-        goto sensor_err;
-    }
-*/
     /* The task ends here. The read/write callbacks will be invoked by the HAP Framework */
     vTaskDelete(NULL);
 
