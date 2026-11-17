@@ -176,8 +176,12 @@ static bool selftest_config_matches(const paradox_config_t *config)
     if (paradox_config_validate(config) != PARADOX_CONFIG_OK ||
         config->panel_debug_enabled !=
             selftest_expected_config.panel_debug_enabled ||
+        memcmp(config->web_auth_salt, selftest_expected_config.web_auth_salt,
+               sizeof(config->web_auth_salt)) != 0 ||
         memcmp(config->web_auth_hash, selftest_expected_config.web_auth_hash,
-               sizeof(config->web_auth_hash)) != 0) {
+               sizeof(config->web_auth_hash)) != 0 ||
+        config->web_auth_password_set !=
+            selftest_expected_config.web_auth_password_set) {
         return false;
     }
     for (size_t i = 0; i < PARADOX_MAX_ZONES; i++) {
@@ -196,8 +200,11 @@ static bool selftest_config_is_default(const paradox_config_t *config)
     paradox_config_defaults(&selftest_expected_config);
     if (paradox_config_validate(config) != PARADOX_CONFIG_OK ||
         config->panel_debug_enabled ||
+        memcmp(config->web_auth_salt, selftest_expected_config.web_auth_salt,
+               sizeof(config->web_auth_salt)) != 0 ||
         memcmp(config->web_auth_hash, selftest_expected_config.web_auth_hash,
-               sizeof(config->web_auth_hash)) != 0) {
+               sizeof(config->web_auth_hash)) != 0 ||
+        config->web_auth_password_set) {
         return false;
     }
     for (size_t i = 0; i < PARADOX_MAX_ZONES; i++) {
@@ -245,7 +252,8 @@ static esp_err_t selftest_write_phase(uint8_t phase)
 static esp_err_t selftest_write_legacy_blob(const paradox_config_t *config)
 {
     const size_t blob_size = PARADOX_CONFIG_BLOB_MAX_SIZE -
-                             PARADOX_CONFIG_WEB_AUTH_HASH_SIZE;
+                             PARADOX_CONFIG_WEB_AUTH_SALT_SIZE -
+                             PARADOX_CONFIG_WEB_AUTH_HASH_SIZE - 1u;
     uint8_t *blob = malloc(blob_size);
     if (blob == NULL) {
         return ESP_ERR_NO_MEM;

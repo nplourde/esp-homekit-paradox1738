@@ -50,6 +50,69 @@ static size_t push_drain(paradox_decoder_t *dec, const uint8_t *bytes, size_t le
     return n;
 }
 
+/* Regression: the panel emits wireless detector supervision / low-battery and
+ * keyswitch events (EventIds 31..38) interleaved with the zone traffic. When
+ * those were classified as unknown, every wireless frame was rejected, the
+ * resync logic slid out of phase, and the clock bytes started decoding as
+ * plausible events of other categories -- so subsequent zone frames reported
+ * the wrong zone numbers ("incomplete messages pointing at the wrong zone").
+ * A whole stream must decode with every zone intact and zero framing errors. */
+void test_wireless_events_interleaved_keep_zone_numbering(void)
+{
+    paradox_decoder_t dec;
+    paradox_event_t evt[24];
+    uint8_t stream[13 * PARADOX_FRAME_LEN];
+    size_t len = 0;
+
+    /* A realistic walk-through-the-house: kitchen zone 1 and living room zone 2
+     * movement, with wireless supervision and battery reports in between. The
+     * clock advances so the hour byte changes (0x48 at 9am is exactly the byte
+     * that used to masquerade as event 18 once out of phase). */
+    static const struct {
+        uint8_t event_id;
+        uint8_t zone;
+        uint8_t hour;
+        uint8_t minute;
+    } seq[] = {
+        {PARADOX_EVT_ZONE_OPEN, 1, 9, 0},
+        {PARADOX_EVT_WIRELESS_SUPERVISION_LOSS, 5, 9, 0},
+        {PARADOX_EVT_ZONE_OK, 1, 9, 1},
+        {PARADOX_EVT_ZONE_OPEN, 2, 9, 2},
+        {PARADOX_EVT_WIRELESS_LOW_BATTERY, 7, 9, 2},
+        {PARADOX_EVT_ZONE_OK, 2, 9, 3},
+        {PARADOX_EVT_KEYSWITCH_ARM, 1, 10, 0},
+        {PARADOX_EVT_ZONE_OPEN, 1, 10, 1},
+        {PARADOX_EVT_WIRELESS_SUPERVISION_RESTORE, 5, 10, 1},
+        {PARADOX_EVT_ZONE_OK, 1, 10, 2},
+        {PARADOX_EVT_WIRELESS_LOW_BATTERY_RESTORE, 7, 10, 2},
+        {PARADOX_EVT_KEYSWITCH_DISARM, 1, 10, 3},
+        {PARADOX_EVT_ZONE_OPEN, 2, 10, 4},
+    };
+
+    paradox_decoder_init(&dec);
+    for (size_t i = 0; i < sizeof(seq) / sizeof(seq[0]); i++) {
+        uint8_t *frame = stream + len;
+        make_frame(frame, seq[i].event_id, seq[i].zone);
+        set_clock(frame, seq[i].hour, seq[i].minute);
+        len += PARADOX_FRAME_LEN;
+    }
+
+    size_t n = push_drain(&dec, stream, len, evt, sizeof(evt) / sizeof(evt[0]));
+
+    TEST_ASSERT_EQUAL_SIZE_MESSAGE(sizeof(seq) / sizeof(seq[0]), n,
+                                   "every frame in the stream must decode");
+    for (size_t i = 0; i < sizeof(seq) / sizeof(seq[0]); i++) {
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(seq[i].event_id, evt[i].event_id,
+                                        paradox_event_name(seq[i].event_id));
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(seq[i].zone, evt[i].category_id,
+                                        paradox_event_name(seq[i].event_id));
+    }
+    /* No byte may be discarded: the stream is clean once ids 31..38 are known. */
+    TEST_ASSERT_EQUAL_UINT32(0, dec.stats.framing_errors);
+    TEST_ASSERT_EQUAL_UINT32(0, dec.stats.bytes_discarded);
+    TEST_ASSERT_EQUAL_UINT32(sizeof(seq) / sizeof(seq[0]), dec.stats.frames_ok);
+}
+
 /* T1.3: a valid frame, then a stream with one byte deleted mid-way, then more
  * valid frames. Alignment must come back within one discarded frame. */
 void test_resync_after_single_dropped_byte(void)
@@ -67,7 +130,7 @@ void test_resync_after_single_dropped_byte(void)
 
     /* Clean frame first. */
     TEST_ASSERT_EQUAL_SIZE(1, paradox_decoder_push(&dec, f1, 4, evt, 8));
-    TEST_ASSERT_EQUAL_UINT8(2, evt[0].event_id);
+    TEST_ASSERT_EQUAL_UINT8(1, evt[0].event_id);
     TEST_ASSERT_EQUAL_UINT8(1, evt[0].category_id);
 
     /* Now f2 with its second byte removed: the stream is misaligned from here. */
@@ -82,7 +145,7 @@ void test_resync_after_single_dropped_byte(void)
      * two frames, and we must have counted exactly one framing error. */
     TEST_ASSERT_EQUAL_UINT32(1, dec.stats.framing_errors);
     TEST_ASSERT_EQUAL_SIZE(1, n);
-    TEST_ASSERT_EQUAL_UINT8(2, evt[0].event_id);
+    TEST_ASSERT_EQUAL_UINT8(1, evt[0].event_id);
     TEST_ASSERT_EQUAL_UINT8(3, evt[0].category_id);
 
     /* And the decoder is aligned again: a following frame decodes cleanly with
@@ -299,10 +362,79 @@ void test_non_terminated_frame_never_overread(void)
     free(frame);
 }
 
+/*
+ * Regression test for the event-numbering bug found with the raw UART tap.
+ * These 16 bytes are a verbatim slice of a live capture of an idle panel
+ * (GET /api/debug/raw). The panel broadcasts them in groups of four quartets
+ * that share one clock value; with the event table copied from the reference
+ * project's README the middle two quartets of every group were rejected as
+ * framing errors, so half of all traffic was discarded. They are real events
+ * under the numbering the reference implementation's code actually uses.
+ */
+void test_idle_panel_broadcast_decodes_cleanly(void)
+{
+    static const uint8_t capture[] = {
+        /* clock 20:14 */
+        0x04, 0x21, 0xa0, 0xe0, 0x08, 0x01, 0xa0, 0xe0,
+        0x00, 0x21, 0xa0, 0xe0, 0x08, 0x11, 0xa0, 0xe0,
+        /* clock 20:15 */
+        0x04, 0x21, 0xa0, 0xf0, 0x08, 0x01, 0xa0, 0xf0,
+        0x00, 0x21, 0xa0, 0xf0, 0x08, 0x11, 0xa0, 0xf0,
+        /* clock 20:18, zone 1 variant */
+        0x04, 0x11, 0xa1, 0x20, 0x08, 0x01, 0xa1, 0x20,
+        0x00, 0x11, 0xa1, 0x20, 0x08, 0x11, 0xa1, 0x20,
+        /* clock 20:18, zone 2 */
+        0x04, 0x21, 0xa1, 0x20, 0x08, 0x01, 0xa1, 0x20,
+        0x00, 0x21, 0xa1, 0x20, 0x08, 0x11, 0xa1, 0x20,
+    };
+    paradox_decoder_t dec;
+    paradox_event_t evt[16];
+    size_t n;
+
+    paradox_decoder_init(&dec);
+
+    n = paradox_decoder_push(&dec, capture, sizeof(capture), evt, 16);
+    TEST_ASSERT_EQUAL_SIZE(16, n);
+    TEST_ASSERT_EQUAL_UINT32(16, dec.stats.frames_ok);
+    TEST_ASSERT_EQUAL_UINT32(0, dec.stats.framing_errors);
+    TEST_ASSERT_EQUAL_UINT32(0, dec.stats.bytes_discarded);
+    TEST_ASSERT_EQUAL_UINT32(0, dec.stats.overruns);
+    TEST_ASSERT_EQUAL_SIZE(0, paradox_decoder_pending(&dec));
+
+    /* One group, decoded the way the panel means it. */
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_EVT_ZONE_OPEN, evt[0].event_id);
+    TEST_ASSERT_EQUAL_UINT8(2, evt[0].category_id);
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_CLS_ZONE, evt[0].cls);
+    TEST_ASSERT_TRUE(evt[0].zone_open);
+
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_EVT_PARTITION_STATUS, evt[1].event_id);
+    TEST_ASSERT_EQUAL_UINT8(0, evt[1].category_id);
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_CLS_PARTITION_STATUS, evt[1].cls);
+    TEST_ASSERT_EQUAL_STRING("System Not Ready",
+                             paradox_category_name(evt[1].cls, evt[1].category_id));
+
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_EVT_ZONE_OK, evt[2].event_id);
+    TEST_ASSERT_EQUAL_UINT8(2, evt[2].category_id);
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_CLS_ZONE, evt[2].cls);
+    TEST_ASSERT_FALSE(evt[2].zone_open);
+
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_EVT_PARTITION_STATUS, evt[3].event_id);
+    TEST_ASSERT_EQUAL_UINT8(1, evt[3].category_id);
+    TEST_ASSERT_EQUAL_STRING("System Ready",
+                             paradox_category_name(evt[3].cls, evt[3].category_id));
+
+    /* The zone-1 variant of the same group keeps the zone numbering. */
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_EVT_ZONE_OPEN, evt[8].event_id);
+    TEST_ASSERT_EQUAL_UINT8(1, evt[8].category_id);
+    TEST_ASSERT_EQUAL_UINT8(PARADOX_EVT_ZONE_OK, evt[10].event_id);
+    TEST_ASSERT_EQUAL_UINT8(1, evt[10].category_id);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_resync_after_single_dropped_byte);
+    RUN_TEST(test_wireless_events_interleaved_keep_zone_numbering);
     RUN_TEST(test_one_framing_error_per_corruption);
     RUN_TEST(test_partial_input_never_hangs_or_emits);
     RUN_TEST(test_caller_struct_untouched_on_no_event);
@@ -311,5 +443,6 @@ int main(void)
     RUN_TEST(test_realigns_out_of_long_junk_run);
     RUN_TEST(test_stats_clear_keeps_alignment);
     RUN_TEST(test_non_terminated_frame_never_overread);
+    RUN_TEST(test_idle_panel_broadcast_decodes_cleanly);
     return UNITY_END();
 }

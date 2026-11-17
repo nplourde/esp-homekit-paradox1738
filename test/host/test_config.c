@@ -19,6 +19,13 @@ void test_defaults_cover_all_zones(void)
 
     TEST_ASSERT_EQUAL_INT(PARADOX_CONFIG_OK, paradox_config_validate(&config));
     TEST_ASSERT_FALSE(config.panel_debug_enabled);
+    TEST_ASSERT_FALSE(config.web_auth_password_set);
+    TEST_ASSERT_EQUAL_MEMORY((uint8_t[PARADOX_CONFIG_WEB_AUTH_SALT_SIZE]){0},
+                             config.web_auth_salt,
+                             sizeof(config.web_auth_salt));
+    TEST_ASSERT_EQUAL_MEMORY((uint8_t[PARADOX_CONFIG_WEB_AUTH_HASH_SIZE]){0},
+                             config.web_auth_hash,
+                             sizeof(config.web_auth_hash));
     for (int i = 0; i < PARADOX_MAX_ZONES; i++) {
         TEST_ASSERT_TRUE(config.zones[i].enabled);
         TEST_ASSERT_EQUAL_INT(PARADOX_HK_SERVICE_CONTACT,
@@ -66,6 +73,43 @@ void test_mutators_validate_service_and_name_values(void)
     TEST_ASSERT_EQUAL_STRING("Workshop", config.zones[2].name);
 }
 
+void test_zone_update_is_atomic_for_invalid_fields(void)
+{
+    paradox_config_t config;
+    paradox_config_defaults(&config);
+    paradox_config_t original = config;
+
+    TEST_ASSERT_EQUAL_INT(
+        PARADOX_CONFIG_INVALID_VALUE,
+        paradox_config_update_zone(&config, 3, "Changed",
+                                   true, 99, true, false, true));
+    TEST_ASSERT_EQUAL_MEMORY(&original, &config, sizeof(config));
+
+    TEST_ASSERT_EQUAL_INT(
+        PARADOX_CONFIG_NAME_TOO_LONG,
+        paradox_config_update_zone(&config, 3,
+                                   "This zone name is definitely much too long "
+                                   "for the configured maximum length",
+                                   true, PARADOX_HK_SERVICE_CONTACT, true,
+                                   false, true));
+    TEST_ASSERT_EQUAL_MEMORY(&original, &config, sizeof(config));
+    TEST_ASSERT_EQUAL_INT(
+        PARADOX_CONFIG_ZONE_OUT_OF_RANGE,
+        paradox_config_update_zone(&config, 17, "Bad zone", true,
+                                   PARADOX_HK_SERVICE_CONTACT, true,
+                                   false, true));
+    TEST_ASSERT_EQUAL_MEMORY(&original, &config, sizeof(config));
+
+    TEST_ASSERT_EQUAL_INT(
+        PARADOX_CONFIG_OK,
+        paradox_config_update_zone(&config, 7, "Side Door", true,
+                                   PARADOX_HK_SERVICE_MOTION, true,
+                                   false, true));
+    TEST_ASSERT_EQUAL_STRING("Side Door", config.zones[6].name);
+    TEST_ASSERT_EQUAL_INT(PARADOX_HK_SERVICE_MOTION, config.zones[6].service);
+    TEST_ASSERT_FALSE(config.zones[6].enabled);
+}
+
 void test_config_encoder_round_trips_valid_config(void)
 {
     paradox_config_t expected;
@@ -80,11 +124,14 @@ void test_config_encoder_round_trips_valid_config(void)
     TEST_ASSERT_EQUAL_INT(PARADOX_CONFIG_OK,
                           paradox_config_set_panel_debug(&expected, true));
 
+    uint8_t salt[PARADOX_CONFIG_WEB_AUTH_SALT_SIZE];
     uint8_t hash[PARADOX_CONFIG_WEB_AUTH_HASH_SIZE];
+    memset(salt, 0x31, sizeof(salt));
     memset(hash, 0x5a, sizeof(hash));
     TEST_ASSERT_EQUAL_INT(PARADOX_CONFIG_OK,
-                          paradox_config_set_web_auth_hash(
-                              &expected, hash, sizeof(hash)));
+                          paradox_config_set_web_auth(
+                              &expected, salt, sizeof(salt), hash,
+                              sizeof(hash), true));
 
     uint8_t blob[PARADOX_CONFIG_BLOB_MAX_SIZE];
     size_t blob_size = 0;
@@ -115,7 +162,8 @@ void test_v0_config_migrates_and_keeps_existing_values(void)
                           paradox_config_set_panel_debug(&expected, true));
 
     const size_t v0_size = PARADOX_CONFIG_BLOB_MAX_SIZE -
-                          PARADOX_CONFIG_WEB_AUTH_HASH_SIZE;
+                           PARADOX_CONFIG_WEB_AUTH_SALT_SIZE -
+                           PARADOX_CONFIG_WEB_AUTH_HASH_SIZE - 1u;
     uint8_t old_blob[PARADOX_CONFIG_BLOB_MAX_SIZE];
     size_t offset = 0;
     old_blob[offset++] = 0;
@@ -137,6 +185,41 @@ void test_v0_config_migrates_and_keeps_existing_values(void)
     TEST_ASSERT_EQUAL_INT(PARADOX_HK_SERVICE_MOTION, actual.zones[6].service);
     TEST_ASSERT_FALSE(actual.zones[11].enabled);
     TEST_ASSERT_TRUE(actual.panel_debug_enabled);
+    for (size_t i = 0; i < sizeof(actual.web_auth_hash); i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, actual.web_auth_hash[i]);
+    }
+}
+
+void test_v1_auth_hash_migrates_without_reusing_unsalted_hash(void)
+{
+    paradox_config_t expected;
+    paradox_config_defaults(&expected);
+    const size_t v0_size = PARADOX_CONFIG_BLOB_MAX_SIZE -
+                           PARADOX_CONFIG_WEB_AUTH_SALT_SIZE -
+                           PARADOX_CONFIG_WEB_AUTH_HASH_SIZE - 1u;
+    const size_t v1_size = v0_size + PARADOX_CONFIG_WEB_AUTH_HASH_SIZE;
+    uint8_t old_blob[PARADOX_CONFIG_BLOB_MAX_SIZE] = {0};
+    size_t offset = 0;
+    old_blob[offset++] = 1u;
+    for (size_t i = 0; i < PARADOX_MAX_ZONES; i++) {
+        const paradox_zone_config_t *zone = &expected.zones[i];
+        old_blob[offset++] = zone->enabled ? 1u : 0u;
+        old_blob[offset++] = (uint8_t)zone->service;
+        memcpy(old_blob + offset, zone->name, sizeof(zone->name));
+        offset += sizeof(zone->name);
+    }
+    old_blob[offset++] = 0;
+    memset(old_blob + offset, 0xa5, PARADOX_CONFIG_WEB_AUTH_HASH_SIZE);
+
+    paradox_config_t actual;
+    bool migrated = false;
+    TEST_ASSERT_EQUAL_SIZE(v1_size, offset + PARADOX_CONFIG_WEB_AUTH_HASH_SIZE);
+    TEST_ASSERT_TRUE(paradox_config_decode(old_blob, v1_size, &actual, &migrated));
+    TEST_ASSERT_TRUE(migrated);
+    TEST_ASSERT_FALSE(actual.web_auth_password_set);
+    for (size_t i = 0; i < sizeof(actual.web_auth_salt); i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, actual.web_auth_salt[i]);
+    }
     for (size_t i = 0; i < sizeof(actual.web_auth_hash); i++) {
         TEST_ASSERT_EQUAL_UINT8(0, actual.web_auth_hash[i]);
     }
@@ -166,8 +249,10 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_defaults_cover_all_zones);
     RUN_TEST(test_mutators_validate_service_and_name_values);
+    RUN_TEST(test_zone_update_is_atomic_for_invalid_fields);
     RUN_TEST(test_config_encoder_round_trips_valid_config);
     RUN_TEST(test_v0_config_migrates_and_keeps_existing_values);
+    RUN_TEST(test_v1_auth_hash_migrates_without_reusing_unsalted_hash);
     RUN_TEST(test_decoder_rejects_bad_schema_and_invalid_values);
     return UNITY_END();
 }

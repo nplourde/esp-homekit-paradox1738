@@ -11,13 +11,15 @@
 extern "C" {
 #endif
 
-#define PARADOX_CONFIG_SCHEMA_VERSION 1u
+#define PARADOX_CONFIG_SCHEMA_VERSION 2u
 #define PARADOX_CONFIG_ZONE_NAME_MAX 64u
 #define PARADOX_CONFIG_ZONE_NAME_SIZE (PARADOX_CONFIG_ZONE_NAME_MAX + 1u)
+#define PARADOX_CONFIG_WEB_AUTH_SALT_SIZE 16u
 #define PARADOX_CONFIG_WEB_AUTH_HASH_SIZE 32u
 #define PARADOX_CONFIG_BLOB_MAX_SIZE \
     (1u + PARADOX_MAX_ZONES * (1u + 1u + PARADOX_CONFIG_ZONE_NAME_SIZE) + \
-     1u + PARADOX_CONFIG_WEB_AUTH_HASH_SIZE)
+     1u + PARADOX_CONFIG_WEB_AUTH_SALT_SIZE + \
+     PARADOX_CONFIG_WEB_AUTH_HASH_SIZE + 1u)
 
 typedef enum {
     PARADOX_HK_SERVICE_CONTACT = 0,
@@ -35,8 +37,10 @@ typedef struct {
 typedef struct {
     paradox_zone_config_t zones[PARADOX_MAX_ZONES];
     bool panel_debug_enabled;
-    /* All zeroes means no web-auth hash has been configured. */
+    /* A false password_set flag means the hash is for a temporary bootstrap password. */
+    uint8_t web_auth_salt[PARADOX_CONFIG_WEB_AUTH_SALT_SIZE];
     uint8_t web_auth_hash[PARADOX_CONFIG_WEB_AUTH_HASH_SIZE];
+    bool web_auth_password_set;
 } paradox_config_t;
 
 typedef enum {
@@ -52,14 +56,18 @@ void paradox_config_defaults(paradox_config_t *config);
 paradox_config_result_t paradox_config_validate(const paradox_config_t *config);
 paradox_config_result_t paradox_config_set_zone_enabled(
     paradox_config_t *config, int zone_id, bool enabled);
+paradox_config_result_t paradox_config_update_zone(
+    paradox_config_t *config, int zone_id, const char *name, bool update_name,
+    int service, bool update_service, bool enabled, bool update_enabled);
 paradox_config_result_t paradox_config_set_zone_service(
     paradox_config_t *config, int zone_id, paradox_hk_service_t service);
 paradox_config_result_t paradox_config_set_zone_name(
     paradox_config_t *config, int zone_id, const char *name);
 paradox_config_result_t paradox_config_set_panel_debug(
     paradox_config_t *config, bool enabled);
-paradox_config_result_t paradox_config_set_web_auth_hash(
-    paradox_config_t *config, const uint8_t *hash, size_t hash_size);
+paradox_config_result_t paradox_config_set_web_auth(
+    paradox_config_t *config, const uint8_t *salt, size_t salt_size,
+    const uint8_t *hash, size_t hash_size, bool password_set);
 
 /* Stable byte encoding used by the NVS adapter and host-side codec tests. */
 size_t paradox_config_blob_max_size(void);

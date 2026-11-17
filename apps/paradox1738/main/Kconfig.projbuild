@@ -1,5 +1,29 @@
 menu "Example Configuration"
 
+    config PARADOX_WEB_SERVER
+        bool "Enable the authenticated web server"
+        default y
+        help
+            Start the port 80 HTTP server for the bridge login page and API.
+            Disable to omit the server while retaining HomeKit and Wi-Fi.
+
+    config PARADOX_EVENT_LOG_CAPACITY
+        int "Panel event log capacity"
+        range 8 256
+        default 64
+        help
+            Number of decoded panel events retained in RAM for the web API.
+
+    config PARADOX_RAW_TAP_CAPACITY
+        int "Raw panel UART tap size (bytes)"
+        range 256 16384
+        default 2048
+        help
+            Size of the byte-for-byte copy of everything received on the panel
+            UART that is kept in RAM. The authenticated web debug endpoints
+            expose it as hex, so the link framing can be investigated over
+            Wi-Fi instead of with a serial cable.
+
     config EXAMPLE_USE_HARDCODED_SETUP_CODE
         bool "Use hard-coded setup code"
         default y
@@ -54,6 +78,14 @@ menu "Example Configuration"
                 schema migration and corrupt-blob fallback. The test reboots
                 automatically between its phases.
 
-    endmenu
+        config PARADOX_OTA_ROLLBACK_SELFTEST
+            bool "Reboot a pending OTA image before validation"
+            depends on BOOTLOADER_APP_ROLLBACK_ENABLE
+            default n
+            help
+                Reboot immediately when an OTA image is pending verification so
+                the bootloader rollback path can be tested on hardware.
+
+        endmenu
 
 endmenu

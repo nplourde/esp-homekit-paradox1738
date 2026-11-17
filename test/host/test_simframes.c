@@ -124,6 +124,44 @@ void test_recorded_stream_covers_all_zones(void)
     }
 }
 
+void test_recorded_stream_covers_m3_alarm_events(void)
+{
+    paradox_decoder_t dec;
+    paradox_event_t events[SIM_MAX_FRAMES];
+    bool seen[31][PARADOX_MAX_ZONES + 1] = {{false}};
+
+    load_table();
+    paradox_decoder_init(&dec);
+    size_t produced = paradox_decoder_push(
+        &dec, &frames[0][0], frame_count * PARADOX_FRAME_LEN,
+        events, SIM_MAX_FRAMES);
+    TEST_ASSERT_EQUAL_SIZE(frame_count, produced);
+
+    for (size_t i = 0; i < produced; i++) {
+        uint8_t event_id = events[i].event_id;
+        uint8_t category_id = events[i].category_id;
+        TEST_ASSERT_TRUE(event_id <= PARADOX_EVT_SPECIAL_REPORT);
+        TEST_ASSERT_TRUE(category_id <= PARADOX_MAX_ZONES);
+        seen[event_id][category_id] = true;
+    }
+
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_ZONE_BYPASSED][5]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_ZONE_ALARM][5]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_ZONE_ALARM_RESTORE][5]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_ZONE_TAMPER][5]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_ZONE_TAMPER_RESTORE][5]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_FIRE_ALARM][2]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_FIRE_RESTORE][2]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_SPECIAL_ALARM][2]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_SYSTEM_TROUBLE][7]);
+    TEST_ASSERT_TRUE(seen[PARADOX_EVT_SYSTEM_TROUBLE_RESTORE][7]);
+}
+
+void test_runtime_simulator_interval_is_nonzero(void)
+{
+    TEST_ASSERT_TRUE(paradox_sim_test_interval_ms() > 0);
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -131,5 +169,7 @@ int main(void)
     RUN_TEST(test_recorded_stream_decodes_without_resync);
     RUN_TEST(test_recorded_stream_bytewise_matches);
     RUN_TEST(test_recorded_stream_covers_all_zones);
+    RUN_TEST(test_recorded_stream_covers_m3_alarm_events);
+    RUN_TEST(test_runtime_simulator_interval_is_nonzero);
     return UNITY_END();
 }

@@ -13,12 +13,17 @@
  *   b0: 0b EEEE EECC      bits 1-4  unused
  *                          bits 5-6 low two bits of CategoryId
  *                          bits 7-8 EventId bit 0..1 ... actually:
- *   EventId    = b0 >> 2              (6 bits, values 1..30)
+ *   EventId    = b0 >> 2              (6 bits, values 0..38)
  *   CategoryId = ((b0 & 3) << 4) + (b1 >> 4)   (7 bits, values 0..48)
  *
- * Note the reference demo code sets IsZoneOpen when EventId == 1, which
- * contradicts its own table (1 = "Zone OK", 2 = "Zone Open"). The table is
- * taken as authoritative here: 1 means closed, 2 means open.
+ * The event numbering follows the table in the reference project's *source
+ * code* (0 = "Zone OK", 1 = "Zone Open", 2 = "Partition Status"), which is the
+ * table the panel actually speaks. Its README prints the same list shifted by
+ * one for those three ids; a raw UART capture of the panel confirms the code
+ * table: the panel's idle broadcast is
+ *   04 21 a0 e0 / 08 01 a0 e0 / 00 21 a0 e0 / 08 11 a0 e0
+ * which decodes cleanly (Zone Open zone 2, Partition Status "not ready", Zone
+ * OK zone 2, Partition Status "ready") only under the code numbering.
  */
 uint8_t paradox_frame_event_id(uint8_t b0)
 {
@@ -72,8 +77,23 @@ paradox_class_t paradox_event_class(uint8_t event_id)
         return PARADOX_CLS_TROUBLE;
     case PARADOX_EVT_SPECIAL_REPORT:
         return PARADOX_CLS_SPECIAL_REPORT;
+    /* Wireless detector supervision/battery and keyswitch events all carry a
+     * zone number in CategoryId. They must classify as zone events: a panel
+     * with wireless detectors fitted emits them interleaved with the traffic
+     * above, and rejecting them makes the resync logic slide out of phase, so
+     * the clock bytes start masquerading as events of other categories (that
+     * is what shows up as wrong zone numbers). */
+    case PARADOX_EVT_WIRELESS_SUPERVISION_LOSS:
+    case PARADOX_EVT_WIRELESS_SUPERVISION_RESTORE:
+    case PARADOX_EVT_KEYSWITCH_ARM:
+    case PARADOX_EVT_KEYSWITCH_DISARM:
+    case PARADOX_EVT_KEYSWITCH_DISARM_AFTER_ALARM:
+    case PARADOX_EVT_KEYSWITCH_CANCEL_ALARM:
+    case PARADOX_EVT_WIRELESS_LOW_BATTERY:
+    case PARADOX_EVT_WIRELESS_LOW_BATTERY_RESTORE:
+        return PARADOX_CLS_ZONE;
     default:
-        /* 0 and 4 are never emitted; anything else is unknown. */
+        /* 3 and 4 are never emitted; anything else is unknown. */
         return PARADOX_CLS_UNKNOWN;
     }
 }
@@ -169,6 +189,14 @@ const char *paradox_event_name(uint8_t event_id)
     case PARADOX_EVT_SYSTEM_TROUBLE:        return "System Trouble";
     case PARADOX_EVT_SYSTEM_TROUBLE_RESTORE:return "System Trouble Restore";
     case PARADOX_EVT_SPECIAL_REPORT:        return "Special Reporting";
+    case PARADOX_EVT_WIRELESS_SUPERVISION_LOSS:     return "Wireless Supervision Loss";
+    case PARADOX_EVT_WIRELESS_SUPERVISION_RESTORE:  return "Wireless Supervision Restore";
+    case PARADOX_EVT_KEYSWITCH_ARM:         return "Keyswitch Arm";
+    case PARADOX_EVT_KEYSWITCH_DISARM:      return "Keyswitch Disarm";
+    case PARADOX_EVT_KEYSWITCH_DISARM_AFTER_ALARM: return "Keyswitch Disarm After Alarm";
+    case PARADOX_EVT_KEYSWITCH_CANCEL_ALARM:return "Keyswitch Cancel Alarm";
+    case PARADOX_EVT_WIRELESS_LOW_BATTERY:  return "Wireless Low Battery";
+    case PARADOX_EVT_WIRELESS_LOW_BATTERY_RESTORE:  return "Wireless Low Battery Restore";
     default:                                return "Unknown";
     }
 }
@@ -270,7 +298,7 @@ const char *paradox_category_name(paradox_class_t cls, uint8_t category_id)
 /*
  * Without a header or checksum, the only way to spot misalignment is to check
  * that the decoded fields are ones the panel could actually send:
- *   - EventId must be a known event (never 0 or 4)
+ *   - EventId must be a known event (never 3 or 4)
  *   - CategoryId must fit the range used by that event
  * A wrong phase almost always fails this, and sliding one byte at a time
  * recovers alignment within a frame or two.
@@ -351,6 +379,7 @@ static void decode_into(const uint8_t *frame, paradox_event_t *evt)
     evt->cls = paradox_event_class(event_id);
     evt->state = paradox_event_state(event_id, &evt->zone_open);
     evt->raw = (uint16_t)((frame[0] << 8) | frame[1]);
+    memcpy(evt->raw_frame, frame, PARADOX_FRAME_LEN);
 }
 
 size_t paradox_decoder_pending(const paradox_decoder_t *dec)

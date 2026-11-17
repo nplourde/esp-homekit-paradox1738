@@ -188,11 +188,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
                 ESP_LOGI(TAG, "Provisioning started");
                 break;
             case WIFI_PROV_CRED_RECV: {
-                wifi_sta_config_t *wifi_sta_cfg = (wifi_sta_config_t *)event_data;
-                ESP_LOGI(TAG, "Received Wi-Fi credentials"
-                         "\n\tSSID     : %s\n\tPassword : %s",
-                         (const char *) wifi_sta_cfg->ssid,
-                         (const char *) wifi_sta_cfg->password);
+                ESP_LOGI(TAG, "Received Wi-Fi credentials");
                 break;
             }
             case WIFI_PROV_CRED_FAIL: {

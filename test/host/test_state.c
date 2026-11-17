@@ -1,5 +1,6 @@
 /*
- * M2: concurrent zone/fire state, input bounds and change notifications.
+ * M2/M3: concurrent zone/fire state, input bounds, notifications and fire
+ * loop trouble mapping.
  */
 #include <unity.h>
 
@@ -91,6 +92,31 @@ void test_notifications_are_emitted_only_on_state_changes(void)
     TEST_ASSERT_EQUAL_INT(3, last_change_zone);
 }
 
+void test_restore_snapshot_reverts_simulated_states_and_notifies_observer(void)
+{
+    notification_count = 0;
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_set_observer(count_notifications, NULL));
+    paradox_state_snapshot_t before;
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK, paradox_state_snapshot(&before));
+
+    paradox_event_t open = make_event(PARADOX_EVT_ZONE_OPEN, 3);
+    paradox_event_t alarm = make_event(PARADOX_EVT_FIRE_ALARM, 2);
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_apply_event(&open, 10));
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_apply_event(&alarm, 11));
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_restore(&before));
+    TEST_ASSERT_EQUAL_UINT(4, notification_count);
+
+    paradox_state_snapshot_t after;
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK, paradox_state_snapshot(&after));
+    TEST_ASSERT_FALSE(after.zones[2].open);
+    TEST_ASSERT_FALSE(after.fire_alarm);
+    TEST_ASSERT_EQUAL_UINT64(before.generation + 3u, after.generation);
+}
+
 void test_alarm_tamper_bypass_and_fire_fields(void)
 {
     paradox_event_t event = make_event(PARADOX_EVT_ZONE_ALARM, 5);
@@ -116,12 +142,31 @@ void test_alarm_tamper_bypass_and_fire_fields(void)
     TEST_ASSERT_TRUE(snapshot.fire_alarm);
     TEST_ASSERT_FALSE(snapshot.fire_restored);
 
-    event = make_event(PARADOX_EVT_FIRE_RESTORE, 2);
-    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+    event = make_event(PARADOX_EVT_SYSTEM_TROUBLE, 1);
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_UNSUPPORTED_EVENT,
                           paradox_state_apply_event(&event, 14));
-    event = make_event(PARADOX_EVT_SPECIAL_ALARM, 2);
+    event = make_event(PARADOX_EVT_SYSTEM_TROUBLE, 7);
     TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
                           paradox_state_apply_event(&event, 15));
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_NO_CHANGE,
+                          paradox_state_apply_event(&event, 16));
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_snapshot(&snapshot));
+    TEST_ASSERT_TRUE(snapshot.fire_fault);
+
+    event = make_event(PARADOX_EVT_SYSTEM_TROUBLE_RESTORE, 7);
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_apply_event(&event, 17));
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_snapshot(&snapshot));
+    TEST_ASSERT_FALSE(snapshot.fire_fault);
+
+    event = make_event(PARADOX_EVT_FIRE_RESTORE, 2);
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_apply_event(&event, 18));
+    event = make_event(PARADOX_EVT_SPECIAL_ALARM, 2);
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
+                          paradox_state_apply_event(&event, 19));
     TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OK,
                           paradox_state_snapshot(&snapshot));
     TEST_ASSERT_TRUE(snapshot.fire_alarm);
@@ -215,6 +260,7 @@ int main(void)
     UNITY_BEGIN();
     RUN_TEST(test_zone_index_bounds_and_unknown_class_are_rejected);
     RUN_TEST(test_notifications_are_emitted_only_on_state_changes);
+    RUN_TEST(test_restore_snapshot_reverts_simulated_states_and_notifies_observer);
     RUN_TEST(test_alarm_tamper_bypass_and_fire_fields);
     RUN_TEST(test_state_snapshots_are_consistent_under_concurrent_access);
     return UNITY_END();

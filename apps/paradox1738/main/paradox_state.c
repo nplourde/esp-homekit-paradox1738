@@ -87,7 +87,10 @@ paradox_state_result_t paradox_state_apply_event(
     if (event->event_id == PARADOX_EVT_FIRE_ALARM ||
         event->event_id == PARADOX_EVT_FIRE_RESTORE ||
         (event->event_id == PARADOX_EVT_SPECIAL_ALARM &&
-         event->category_id == 2)) {
+         event->category_id == 2) ||
+        ((event->event_id == PARADOX_EVT_SYSTEM_TROUBLE ||
+          event->event_id == PARADOX_EVT_SYSTEM_TROUBLE_RESTORE) &&
+         event->category_id == 7)) {
         kind = PARADOX_STATE_CHANGE_FIRE;
     } else if (event->cls == PARADOX_CLS_ZONE) {
         kind = PARADOX_STATE_CHANGE_ZONE;
@@ -101,11 +104,18 @@ paradox_state_result_t paradox_state_apply_event(
     }
 
     if (kind == PARADOX_STATE_CHANGE_FIRE) {
-        bool alarm = event->event_id == PARADOX_EVT_FIRE_ALARM ||
-                     event->event_id == PARADOX_EVT_SPECIAL_ALARM;
-        bool restored = event->event_id == PARADOX_EVT_FIRE_RESTORE;
-        changed |= set_zone_field(&current_state.fire_alarm, alarm);
-        changed |= set_zone_field(&current_state.fire_restored, restored);
+        if (event->event_id == PARADOX_EVT_FIRE_ALARM ||
+            event->event_id == PARADOX_EVT_SPECIAL_ALARM) {
+            changed |= set_zone_field(&current_state.fire_alarm, true);
+            changed |= set_zone_field(&current_state.fire_restored, false);
+        } else if (event->event_id == PARADOX_EVT_FIRE_RESTORE) {
+            changed |= set_zone_field(&current_state.fire_alarm, false);
+            changed |= set_zone_field(&current_state.fire_restored, true);
+        } else {
+            bool fire_fault =
+                event->event_id == PARADOX_EVT_SYSTEM_TROUBLE;
+            changed |= set_zone_field(&current_state.fire_fault, fire_fault);
+        }
         if (changed) {
             current_state.fire_last_change_ms = timestamp_ms;
         }
@@ -172,6 +182,60 @@ paradox_state_result_t paradox_state_snapshot(
     }
     *snapshot = current_state;
     state_unlock();
+    return PARADOX_STATE_OK;
+}
+
+paradox_state_result_t paradox_state_restore(
+    const paradox_state_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return PARADOX_STATE_INVALID_ARGUMENT;
+    }
+    if (!state_lock()) {
+        return PARADOX_STATE_NOT_INITIALIZED;
+    }
+
+    bool changed_zones[PARADOX_MAX_ZONES];
+    bool any_changed = false;
+    for (size_t i = 0; i < PARADOX_MAX_ZONES; i++) {
+        const paradox_zone_state_t *before = &current_state.zones[i];
+        const paradox_zone_state_t *after = &snapshot->zones[i];
+        changed_zones[i] = before->open != after->open ||
+            before->in_alarm != after->in_alarm ||
+            before->tampered != after->tampered ||
+            before->bypassed != after->bypassed ||
+            before->last_change_ms != after->last_change_ms;
+        any_changed |= changed_zones[i];
+    }
+    bool fire_changed =
+        current_state.fire_alarm != snapshot->fire_alarm ||
+        current_state.fire_restored != snapshot->fire_restored ||
+        current_state.fire_fault != snapshot->fire_fault ||
+        current_state.fire_last_change_ms != snapshot->fire_last_change_ms;
+    any_changed |= fire_changed;
+    if (!any_changed) {
+        state_unlock();
+        return PARADOX_STATE_NO_CHANGE;
+    }
+
+    paradox_state_snapshot_t restored = *snapshot;
+    restored.generation = current_state.generation + 1u;
+    current_state = restored;
+    paradox_state_observer_t observer = current_observer;
+    void *context = current_observer_context;
+    state_unlock();
+
+    if (observer != NULL) {
+        for (size_t i = 0; i < PARADOX_MAX_ZONES; i++) {
+            if (changed_zones[i]) {
+                observer(PARADOX_STATE_CHANGE_ZONE, (int)i + 1, &restored,
+                         context);
+            }
+        }
+        if (fire_changed) {
+            observer(PARADOX_STATE_CHANGE_FIRE, 0, &restored, context);
+        }
+    }
     return PARADOX_STATE_OK;
 }
 

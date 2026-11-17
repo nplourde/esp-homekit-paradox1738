@@ -47,11 +47,13 @@ SRC_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(SRC_SRCS))
 # Pure logic lives in the firmware tree so host tests exercise the exact code
 # that ships. paradox_proto.c must stay free of ESP-IDF headers (checked below).
 PURE_SRCS := $(APP_MAIN_DIR)/paradox_proto.c $(APP_MAIN_DIR)/paradox_config.c \
-             $(APP_MAIN_DIR)/paradox_state.c
+             $(APP_MAIN_DIR)/paradox_state.c \
+             $(APP_MAIN_DIR)/paradox_event_log.c \
+             $(APP_MAIN_DIR)/paradox_raw_tap.c
 PURE_OBJS := $(patsubst $(APP_MAIN_DIR)/%.c,$(BUILD)/pure/%.o,$(PURE_SRCS))
 
-# The recorded-panel table is firmware data, but paradox_sim.c only includes
-# paradox1738.h, so the host suite can validate it too (test_simframes.c).
+# The recorded-panel table is firmware data, and paradox_sim.c is host-safe,
+# so the host suite can validate it too (test_simframes.c).
 SIM_CFLAGS := $(CFLAGS) -DCONFIG_PARADOX_SIMULATOR
 SIM_SRCS := $(APP_MAIN_DIR)/paradox_sim.c
 SIM_OBJS := $(patsubst $(APP_MAIN_DIR)/%.c,$(BUILD)/sim/%.o,$(SIM_SRCS))
@@ -71,8 +73,7 @@ $(BUILD)/%: test_%.c $(UNITY_OBJS) $(SRC_OBJS) $(PURE_OBJS) $(SIM_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $^ -o $@ $(LDFLAGS)
 
-# The simulator table is only declared under CONFIG_PARADOX_SIMULATOR, so the
-# suite that reads it needs the same define as paradox_sim.o.
+# The simulator-frame suite shares the simulator define with paradox_sim.o.
 $(BUILD)/simframes: EXTRA_CFLAGS := -DCONFIG_PARADOX_SIMULATOR
 
 $(BUILD)/unity/%.o: $(UNITY_DIR)/%.c

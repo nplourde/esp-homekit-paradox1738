@@ -9,6 +9,10 @@
  *   byte 1-2 : one 16-bit field; bits 11-16 = EventId, bits 5-10 = CategoryId
  *   byte 3-4 : panel clock (BCD time), ignored here
  *
+ * The event ids below follow the event table in the reference implementation's
+ * source code, which is what the panel actually sends. That project's README
+ * prints a table shifted by one for the first three ids; the README is wrong.
+ *
  * Because there is no header, a single lost byte permanently misaligns the
  * stream. The decoder therefore validates each candidate frame and slides by
  * one byte until it finds a plausible one again.
@@ -27,13 +31,12 @@ extern "C" {
 #define PARADOX_FRAME_LEN 4
 #define PARADOX_MAX_ZONES 16
 
-/* EventIds that the Spectra 1738 can emit. 0 and 4 are never used, which is
+/* EventIds that the Spectra 1738 can emit. 3 and 4 are never used, which is
  * part of what makes a misaligned frame detectable. */
 typedef enum {
-    PARADOX_EVT_NONE = 0,
-    PARADOX_EVT_ZONE_OK = 1,
-    PARADOX_EVT_ZONE_OPEN = 2,
-    PARADOX_EVT_PARTITION_STATUS = 3,
+    PARADOX_EVT_ZONE_OK = 0,
+    PARADOX_EVT_ZONE_OPEN = 1,
+    PARADOX_EVT_PARTITION_STATUS = 2,
     PARADOX_EVT_NON_REPORT = 5,
     PARADOX_EVT_REMOTE_ARM_DISARM = 6,
     PARADOX_EVT_REMOTE_BTN_B = 7,
@@ -60,6 +63,20 @@ typedef enum {
     PARADOX_EVT_SYSTEM_TROUBLE = 28,
     PARADOX_EVT_SYSTEM_TROUBLE_RESTORE = 29,
     PARADOX_EVT_SPECIAL_REPORT = 30,
+    /* Wireless-detector and keyswitch traffic. The panel emits these
+     * interleaved with the zone events above whenever a wireless module or a
+     * keyswitch is fitted; CategoryId is the zone (1..16) for all of them.
+     * They must decode as valid frames: rejecting them makes the resync logic
+     * slide out of phase, and the clock bytes then masquerade as events of
+     * other categories -- which shows up as wrong zone numbers. */
+    PARADOX_EVT_WIRELESS_SUPERVISION_LOSS = 31,        /* zones 1..16 */
+    PARADOX_EVT_WIRELESS_SUPERVISION_RESTORE = 32,     /* zones 1..16 */
+    PARADOX_EVT_KEYSWITCH_ARM = 33,                    /* zones 1..16 */
+    PARADOX_EVT_KEYSWITCH_DISARM = 34,                 /* zones 1..16 */
+    PARADOX_EVT_KEYSWITCH_DISARM_AFTER_ALARM = 35,     /* zones 1..16 */
+    PARADOX_EVT_KEYSWITCH_CANCEL_ALARM = 36,           /* zones 1..16 */
+    PARADOX_EVT_WIRELESS_LOW_BATTERY = 37,             /* zones 1..16 */
+    PARADOX_EVT_WIRELESS_LOW_BATTERY_RESTORE = 38,     /* zones 1..16 */
 } paradox_event_id_t;
 
 /* Which family of CategoryId values applies to an event. */
@@ -94,12 +111,14 @@ typedef enum {
 } paradox_state_t;
 
 typedef struct {
-    uint8_t event_id;      /* 1..30                                  */
+    uint8_t event_id;      /* 0..38 */
     uint8_t category_id;   /* meaning depends on cls                 */
     paradox_class_t cls;
     paradox_state_t state;
     bool zone_open;        /* true for the "open/alarm" side of a zone event */
     uint16_t raw;          /* bytes 1-2 as received, for logging     */
+    /* Full wire frame, retained for the authenticated panel-debug API. */
+    uint8_t raw_frame[PARADOX_FRAME_LEN];
 } paradox_event_t;
 
 typedef struct {

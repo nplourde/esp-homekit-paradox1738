@@ -37,6 +37,14 @@ void paradox1738_deinit(void);
  */
 bool paradox1738_event_read(paradox1738_event_t *out_event);
 
+/* One-shot recorded-frame test; unavailable in the continuous simulator build. */
+bool paradox1738_simulator_supported(void);
+bool paradox1738_simulator_start(void);
+bool paradox1738_simulator_active(void);
+bool paradox1738_simulator_complete(void);
+void paradox1738_simulator_cancel(void);
+void paradox1738_simulator_finish(void);
+
 /**
  * @brief copy the decoder counters (framing errors, discarded bytes, overruns)
  *
@@ -68,11 +76,10 @@ void paradox1738_stats_clear(void);
  */
 bool paradox1738_link_selftest(void);
 
-#ifdef CONFIG_PARADOX_SIMULATOR
 /* Recorded-panel replay support (see paradox_sim.c). */
 const uint8_t (*paradox_sim_recorded_frames(void))[4];
 size_t paradox_sim_recorded_frame_count(void);
 size_t paradox_sim_replay_interval_ms(void);
-#endif
+size_t paradox_sim_test_interval_ms(void);
 
 #endif /* _PARADOX1738_H_ */

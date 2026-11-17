@@ -22,6 +22,7 @@ typedef struct {
     paradox_zone_state_t zones[PARADOX_MAX_ZONES];
     bool fire_alarm;
     bool fire_restored;
+    bool fire_fault;
     uint64_t fire_last_change_ms;
     uint64_t generation;
 } paradox_state_snapshot_t;
@@ -49,6 +50,8 @@ paradox_state_result_t paradox_state_apply_event(
     const paradox_event_t *event, uint64_t timestamp_ms);
 paradox_state_result_t paradox_state_snapshot(
     paradox_state_snapshot_t *snapshot);
+paradox_state_result_t paradox_state_restore(
+    const paradox_state_snapshot_t *snapshot);
 paradox_state_result_t paradox_state_set_observer(
     paradox_state_observer_t observer, void *context);
 

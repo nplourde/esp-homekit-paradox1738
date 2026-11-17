@@ -47,10 +47,10 @@ typedef struct {
 } golden_t;
 
 static const golden_t goldens[] = {
-    {1, 1, PARADOX_CLS_ZONE},
-    {2, 16, PARADOX_CLS_ZONE},
-    {3, 0, PARADOX_CLS_PARTITION_STATUS},
-    {3, 11, PARADOX_CLS_PARTITION_STATUS},
+    {0, 1, PARADOX_CLS_ZONE},
+    {1, 16, PARADOX_CLS_ZONE},
+    {2, 0, PARADOX_CLS_PARTITION_STATUS},
+    {2, 11, PARADOX_CLS_PARTITION_STATUS},
     {5, 0, PARADOX_CLS_NON_REPORT},
     {5, 7, PARADOX_CLS_NON_REPORT},
     {6, 1, PARADOX_CLS_REMOTE},
@@ -83,6 +83,14 @@ static const golden_t goldens[] = {
     {29, 7, PARADOX_CLS_TROUBLE},
     {30, 0, PARADOX_CLS_SPECIAL_REPORT},
     {30, 5, PARADOX_CLS_SPECIAL_REPORT},
+    {31, 1, PARADOX_CLS_ZONE},
+    {32, 16, PARADOX_CLS_ZONE},
+    {33, 1, PARADOX_CLS_ZONE},
+    {34, 8, PARADOX_CLS_ZONE},
+    {35, 16, PARADOX_CLS_ZONE},
+    {36, 2, PARADOX_CLS_ZONE},
+    {37, 1, PARADOX_CLS_ZONE},
+    {38, 16, PARADOX_CLS_ZONE},
 };
 
 void test_all_golden_vectors_decode(void)
@@ -100,13 +108,58 @@ void test_all_golden_vectors_decode(void)
     }
 }
 
-/* Events 0 and 4 are never sent: they must be rejected as unknown so the
- * framing decoder can use them to detect misalignment. */
+void test_decoded_event_preserves_all_four_raw_bytes(void)
+{
+    uint8_t frame[PARADOX_FRAME_LEN];
+    paradox_event_t event;
+    paradox_decoder_t decoder;
+    make_frame(frame, PARADOX_EVT_ZONE_OPEN, 5);
+    frame[2] = 0xA0;
+    frame[3] = 0x30;
+    paradox_decoder_init(&decoder);
+
+    TEST_ASSERT_EQUAL_SIZE(1, paradox_decoder_push(
+                                  &decoder, frame, sizeof(frame), &event, 1));
+    TEST_ASSERT_EQUAL_MEMORY(frame, event.raw_frame, sizeof(frame));
+}
+
+/* Events 3 and 4 are never sent: they must be rejected as unknown so the
+ * framing decoder can use them to detect misalignment. EventIds above the
+ * table are unknown too. Event 0 is a real event ("Zone OK"), which the panel
+ * was confirmed to emit by a raw UART capture. */
 void test_never_used_event_ids_are_unknown(void)
 {
-    TEST_ASSERT_EQUAL_INT(PARADOX_CLS_UNKNOWN, (int)paradox_event_class(0));
+    TEST_ASSERT_EQUAL_INT(PARADOX_CLS_ZONE, (int)paradox_event_class(0));
+    TEST_ASSERT_EQUAL_INT(PARADOX_CLS_UNKNOWN, (int)paradox_event_class(3));
     TEST_ASSERT_EQUAL_INT(PARADOX_CLS_UNKNOWN, (int)paradox_event_class(4));
-    TEST_ASSERT_EQUAL_INT(PARADOX_CLS_UNKNOWN, (int)paradox_event_class(31));
+    TEST_ASSERT_EQUAL_INT(PARADOX_CLS_UNKNOWN, (int)paradox_event_class(39));
+}
+
+/* Wireless detector and keyswitch events carry a zone number. They must decode
+ * as valid zone frames: the panel emits them interleaved with the rest, and if
+ * they were rejected the framing decoder would slide out of phase and every
+ * later frame would report the wrong zone. */
+void test_wireless_and_keyswitch_events_are_zone_events(void)
+{
+    static const uint8_t ids[] = {31, 32, 33, 34, 35, 36, 37, 38};
+
+    for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE(PARADOX_CLS_ZONE,
+                                      (int)paradox_event_class(ids[i]),
+                                      paradox_event_name(ids[i]));
+        TEST_ASSERT_NOT_EQUAL("Unknown", paradox_event_name(ids[i]));
+
+        for (uint8_t zone = 1; zone <= PARADOX_MAX_ZONES; zone++) {
+            uint8_t frame[PARADOX_FRAME_LEN];
+            make_frame(frame, ids[i], zone);
+            TEST_ASSERT_TRUE_MESSAGE(paradox_frame_plausible(frame),
+                                     paradox_event_name(ids[i]));
+        }
+        /* Zone 0 is not a valid zone, so the frame stays rejectable. */
+        uint8_t frame[PARADOX_FRAME_LEN];
+        make_frame(frame, ids[i], 0);
+        TEST_ASSERT_FALSE(paradox_frame_plausible(frame));
+    }
 }
 
 /* The mapping the HomeKit layer depends on. */
@@ -114,10 +167,10 @@ void test_zone_and_fire_semantics(void)
 {
     bool open;
 
-    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_CLOSED, (int)paradox_event_state(1, &open));
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_CLOSED, (int)paradox_event_state(0, &open));
     TEST_ASSERT_FALSE(open);
 
-    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OPEN, (int)paradox_event_state(2, &open));
+    TEST_ASSERT_EQUAL_INT(PARADOX_STATE_OPEN, (int)paradox_event_state(1, &open));
     TEST_ASSERT_TRUE(open);
 
     TEST_ASSERT_EQUAL_INT(PARADOX_STATE_FIRE, (int)paradox_event_state(21, &open));
@@ -141,16 +194,16 @@ void test_zone_and_fire_semantics(void)
 /* T1.2: the exact expressions from the reference implementation. */
 void test_bit_math_matches_reference(void)
 {
-    /* Zone 1 closed: evt 1 -> 0x04, cat 1 -> low bits 0 + nibble 1. */
-    TEST_ASSERT_EQUAL_UINT8(1, paradox_frame_event_id(0x04));
-    TEST_ASSERT_EQUAL_UINT8(1, paradox_frame_category_id(0x04, 0x10));
+    /* Zone 1 closed: evt 0 -> 0x00, cat 1 -> low bits 0 + nibble 1. */
+    TEST_ASSERT_EQUAL_UINT8(0, paradox_frame_event_id(0x00));
+    TEST_ASSERT_EQUAL_UINT8(1, paradox_frame_category_id(0x00, 0x10));
 
     /* Zone 16 = 0b010000: the two low bits of byte0 carry the high bits of
      * CategoryId (here 0b01), the high nibble of byte1 the low four (here 0). */
+    TEST_ASSERT_EQUAL_UINT8(0, paradox_frame_event_id(0x01));
+    TEST_ASSERT_EQUAL_UINT8(16, paradox_frame_category_id(0x01, 0x00));
     TEST_ASSERT_EQUAL_UINT8(1, paradox_frame_event_id(0x05));
     TEST_ASSERT_EQUAL_UINT8(16, paradox_frame_category_id(0x05, 0x00));
-    TEST_ASSERT_EQUAL_UINT8(2, paradox_frame_event_id(0x09));
-    TEST_ASSERT_EQUAL_UINT8(16, paradox_frame_category_id(0x09, 0x00));
 
     /* Boundary: data[0] low bits 0b11 and data[1] high nibble 0xF combine to
      * CategoryId 0x3F = 63, the widest value the 6-bit field can hold. */
@@ -188,7 +241,7 @@ void test_low_nibble_of_byte1_ignored(void)
  * decoder for every representable (event, category) pair. */
 void test_frame_round_trip(void)
 {
-    for (uint8_t event_id = 1; event_id <= 30; event_id++) {
+    for (uint8_t event_id = 0; event_id <= PARADOX_EVT_WIRELESS_LOW_BATTERY_RESTORE; event_id++) {
         if (paradox_event_class(event_id) == PARADOX_CLS_UNKNOWN) {
             continue;
         }
@@ -220,7 +273,9 @@ int main(void)
 {
     UNITY_BEGIN();
     RUN_TEST(test_all_golden_vectors_decode);
+    RUN_TEST(test_decoded_event_preserves_all_four_raw_bytes);
     RUN_TEST(test_never_used_event_ids_are_unknown);
+    RUN_TEST(test_wireless_and_keyswitch_events_are_zone_events);
     RUN_TEST(test_zone_and_fire_semantics);
     RUN_TEST(test_bit_math_matches_reference);
     RUN_TEST(test_low_nibble_of_byte1_ignored);

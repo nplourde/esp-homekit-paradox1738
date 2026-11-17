@@ -10,6 +10,18 @@
     (CONFIG_BLOB_HEADER_SIZE + PARADOX_MAX_ZONES * CONFIG_ZONE_RECORD_SIZE + 1u)
 #define CONFIG_V1_BLOB_SIZE \
     (CONFIG_V0_BLOB_SIZE + PARADOX_CONFIG_WEB_AUTH_HASH_SIZE)
+#define CONFIG_V2_BLOB_SIZE \
+    (CONFIG_V0_BLOB_SIZE + PARADOX_CONFIG_WEB_AUTH_SALT_SIZE + \
+     PARADOX_CONFIG_WEB_AUTH_HASH_SIZE + 1u)
+
+static bool bytes_are_zero(const uint8_t *bytes, size_t size)
+{
+    uint8_t value = 0;
+    for (size_t i = 0; i < size; i++) {
+        value |= bytes[i];
+    }
+    return value == 0;
+}
 
 static bool service_is_valid(paradox_hk_service_t service)
 {
@@ -51,6 +63,14 @@ paradox_config_result_t paradox_config_validate(const paradox_config_t *config)
         if (end == zone->name) {
             return PARADOX_CONFIG_NAME_EMPTY;
         }
+    }
+    bool empty_salt = bytes_are_zero(config->web_auth_salt,
+                                     sizeof(config->web_auth_salt));
+    bool empty_hash = bytes_are_zero(config->web_auth_hash,
+                                     sizeof(config->web_auth_hash));
+    if (empty_salt != empty_hash ||
+        (config->web_auth_password_set && empty_hash)) {
+        return PARADOX_CONFIG_INVALID_VALUE;
     }
     return PARADOX_CONFIG_OK;
 }
@@ -94,6 +114,38 @@ paradox_config_result_t paradox_config_set_zone_service(
     return PARADOX_CONFIG_OK;
 }
 
+paradox_config_result_t paradox_config_update_zone(
+    paradox_config_t *config, int zone_id, const char *name, bool update_name,
+    int service, bool update_service, bool enabled, bool update_enabled)
+{
+    if (config == NULL || (update_name && name == NULL)) {
+        return PARADOX_CONFIG_INVALID_ARGUMENT;
+    }
+
+    paradox_config_t candidate = *config;
+    paradox_config_result_t result = PARADOX_CONFIG_OK;
+    if (update_name) {
+        result = paradox_config_set_zone_name(&candidate, zone_id, name);
+    } else if (zone_id < 1 || zone_id > PARADOX_MAX_ZONES) {
+        return PARADOX_CONFIG_ZONE_OUT_OF_RANGE;
+    }
+    if (result == PARADOX_CONFIG_OK && update_service) {
+        if (service < PARADOX_HK_SERVICE_CONTACT ||
+            service > PARADOX_HK_SERVICE_LEAK) {
+            return PARADOX_CONFIG_INVALID_VALUE;
+        }
+        result = paradox_config_set_zone_service(
+            &candidate, zone_id, (paradox_hk_service_t)service);
+    }
+    if (result == PARADOX_CONFIG_OK && update_enabled) {
+        result = paradox_config_set_zone_enabled(&candidate, zone_id, enabled);
+    }
+    if (result == PARADOX_CONFIG_OK) {
+        *config = candidate;
+    }
+    return result;
+}
+
 paradox_config_result_t paradox_config_set_zone_name(
     paradox_config_t *config, int zone_id, const char *name)
 {
@@ -128,26 +180,37 @@ paradox_config_result_t paradox_config_set_panel_debug(
     return PARADOX_CONFIG_OK;
 }
 
-paradox_config_result_t paradox_config_set_web_auth_hash(
-    paradox_config_t *config, const uint8_t *hash, size_t hash_size)
+paradox_config_result_t paradox_config_set_web_auth(
+    paradox_config_t *config, const uint8_t *salt, size_t salt_size,
+    const uint8_t *hash, size_t hash_size, bool password_set)
 {
-    if (config == NULL || (hash == NULL && hash_size != 0)) {
+    if (config == NULL ||
+        (salt == NULL && salt_size != 0) ||
+        (hash == NULL && hash_size != 0)) {
         return PARADOX_CONFIG_INVALID_ARGUMENT;
     }
-    if (hash_size != 0 && hash_size != sizeof(config->web_auth_hash)) {
+    bool clearing = salt_size == 0 && hash_size == 0;
+    if ((!clearing &&
+         (salt_size != sizeof(config->web_auth_salt) ||
+          hash_size != sizeof(config->web_auth_hash))) ||
+        (password_set && clearing)) {
         return PARADOX_CONFIG_INVALID_VALUE;
     }
-    if (hash_size == 0) {
+    if (clearing) {
+        memset(config->web_auth_salt, 0, sizeof(config->web_auth_salt));
         memset(config->web_auth_hash, 0, sizeof(config->web_auth_hash));
+        config->web_auth_password_set = false;
     } else {
+        memcpy(config->web_auth_salt, salt, salt_size);
         memcpy(config->web_auth_hash, hash, hash_size);
+        config->web_auth_password_set = password_set;
     }
     return PARADOX_CONFIG_OK;
 }
 
 size_t paradox_config_blob_max_size(void)
 {
-    return CONFIG_V1_BLOB_SIZE;
+    return CONFIG_V2_BLOB_SIZE;
 }
 
 bool paradox_config_encode(const paradox_config_t *config, uint8_t *blob,
@@ -155,7 +218,7 @@ bool paradox_config_encode(const paradox_config_t *config, uint8_t *blob,
 {
     if (blob == NULL || blob_size == NULL ||
         paradox_config_validate(config) != PARADOX_CONFIG_OK ||
-        blob_capacity < CONFIG_V1_BLOB_SIZE) {
+        blob_capacity < CONFIG_V2_BLOB_SIZE) {
         return false;
     }
 
@@ -171,8 +234,12 @@ bool paradox_config_encode(const paradox_config_t *config, uint8_t *blob,
         cursor += sizeof(zone->name);
     }
     *cursor++ = config->panel_debug_enabled ? 1u : 0u;
+    memcpy(cursor, config->web_auth_salt, sizeof(config->web_auth_salt));
+    cursor += sizeof(config->web_auth_salt);
     memcpy(cursor, config->web_auth_hash, sizeof(config->web_auth_hash));
-    *blob_size = CONFIG_V1_BLOB_SIZE;
+    cursor += sizeof(config->web_auth_hash);
+    *cursor++ = config->web_auth_password_set ? 1u : 0u;
+    *blob_size = CONFIG_V2_BLOB_SIZE;
     return true;
 }
 
@@ -210,9 +277,11 @@ bool paradox_config_decode(const uint8_t *blob, size_t blob_size,
     *migrated = false;
     uint8_t version = blob[0];
     if ((version == 0u && blob_size != CONFIG_V0_BLOB_SIZE) ||
+        (version == 1u && blob_size != CONFIG_V1_BLOB_SIZE) ||
         (version == PARADOX_CONFIG_SCHEMA_VERSION &&
-         blob_size != CONFIG_V1_BLOB_SIZE) ||
-        (version != 0u && version != PARADOX_CONFIG_SCHEMA_VERSION)) {
+         blob_size != CONFIG_V2_BLOB_SIZE) ||
+        (version != 0u && version != 1u &&
+         version != PARADOX_CONFIG_SCHEMA_VERSION)) {
         return false;
     }
 
@@ -226,11 +295,23 @@ bool paradox_config_decode(const uint8_t *blob, size_t blob_size,
 
     if (version == 0u) {
         *migrated = true;
-    } else {
+    } else if (version == 1u) {
         if ((size_t)(end - cursor) != sizeof(config->web_auth_hash)) {
             return false;
         }
+        /* Schema 1 stored no salt, so its auth hash cannot be trusted or used. */
+        *migrated = true;
+    } else {
+        if ((size_t)(end - cursor) != sizeof(config->web_auth_salt) +
+                                           sizeof(config->web_auth_hash) + 1u ||
+            *(end - 1) > 1u) {
+            return false;
+        }
+        memcpy(config->web_auth_salt, cursor, sizeof(config->web_auth_salt));
+        cursor += sizeof(config->web_auth_salt);
         memcpy(config->web_auth_hash, cursor, sizeof(config->web_auth_hash));
+        cursor += sizeof(config->web_auth_hash);
+        config->web_auth_password_set = *cursor != 0;
     }
     return paradox_config_validate(config) == PARADOX_CONFIG_OK;
 }
