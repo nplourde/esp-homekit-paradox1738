@@ -7,6 +7,7 @@
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -115,7 +116,8 @@ static const char *INDEX_HTML =
     "stream.onerror=()=>$('#stream-info').textContent='Live stream reconnecting…'};"
     "const loadSystem=async()=>{const s=await request('/api/system');$('#system-info').textContent="
     "`Wi-Fi ${s.wifi_connected?'connected':'disconnected'} · ${s.version} · ${s.partition}`;"
-    "$('#device-info').textContent=`Firmware ${s.version} on ${s.partition}; Wi-Fi ${s.wifi_connected?'connected':'disconnected'}.`;"
+    "$('#device-info').textContent=`Firmware ${s.version} on ${s.partition}; Wi-Fi ${s.wifi_connected?'connected':'disconnected'}; "
+    "heap ${s.free_heap_bytes} free (low-water ${s.min_free_heap_bytes}), web task stack ${s.web_stack_free_bytes} spare.`;"
     "$('#ota-info').textContent=`Upload limit ${s.update_partition_bytes} bytes. Device will restart after validation.`;"
     "$('#debug-enabled').checked=s.panel_debug_enabled};"
     "const loadZones=async()=>{const data=await request('/api/zones'),root=$('#zone-list');root.replaceChildren();"
@@ -925,7 +927,20 @@ static esp_err_t events_get_handler(httpd_req_t *request)
         limit = (size_t)parsed;
     }
 
-    paradox_event_log_entry_t entries[PARADOX_EVENT_LOG_CAPACITY];
+    /* The whole log goes on the heap, never on the stack: capacity * 24 bytes is
+     * ~1.5 KiB on top of everything else this task already uses, and that is
+     * what overflowed the httpd task stack while serving /api/events. The heap
+     * also turns a failed allocation into a clean 500 instead of a reboot.
+     *
+     * The snapshot still takes the full log even when a filter or a small limit
+     * is in play, because "limit" counts matching events, not raw log slots:
+     * stopping at `limit` newest entries would drop older events that match. */
+    paradox_event_log_entry_t *entries = malloc(
+        sizeof(*entries) * PARADOX_EVENT_LOG_CAPACITY);
+    if (entries == NULL) {
+        return send_error(request, "500 Internal Server Error",
+                          "Response allocation failed");
+    }
     size_t count = paradox_event_log_snapshot(entries,
                                               PARADOX_EVENT_LOG_CAPACITY);
     cJSON *root = cJSON_CreateObject();
@@ -933,10 +948,12 @@ static esp_err_t events_get_handler(httpd_req_t *request)
     if (root == NULL || events == NULL) {
         cJSON_Delete(root);
         cJSON_Delete(events);
+        free(entries);
         return send_error(request, "500 Internal Server Error",
                           "Response allocation failed");
     }
     size_t added = 0;
+    bool alloc_failed = false;
     for (size_t i = 0; i < count && added < limit; i++) {
         const paradox_event_t *event = &entries[i].event;
         if (class_filter_set && event->cls != class_filter) {
@@ -949,22 +966,24 @@ static esp_err_t events_get_handler(httpd_req_t *request)
         }
         cJSON *item = event_json(&entries[i]);
         if (item == NULL) {
-            cJSON_Delete(root);
-            cJSON_Delete(events);
-            return send_error(request, "500 Internal Server Error",
-                              "Response allocation failed");
+            alloc_failed = true;
+            break;
         }
         if (!cJSON_AddItemToArray(events, item)) {
             cJSON_Delete(item);
-            cJSON_Delete(root);
-            cJSON_Delete(events);
-            return send_error(request, "500 Internal Server Error",
-                              "Response allocation failed");
+            alloc_failed = true;
+            break;
         }
         added++;
     }
-    if (cJSON_AddNumberToObject(root, "count", (double)added) == NULL ||
-        !cJSON_AddItemToObject(root, "events", events)) {
+    if (!alloc_failed &&
+        (cJSON_AddNumberToObject(root, "count", (double)added) == NULL ||
+         !cJSON_AddItemToObject(root, "events", events))) {
+        alloc_failed = true;
+    }
+    free(entries);
+    if (alloc_failed) {
+        /* Neither root nor events is attached to anything yet at this point. */
         cJSON_Delete(root);
         cJSON_Delete(events);
         return send_error(request, "500 Internal Server Error",
@@ -1544,6 +1563,19 @@ static esp_err_t system_info_handler(httpd_req_t *request)
     debug_enabled = s_config->panel_debug_enabled;
     config_unlock();
 
+    /* Memory headroom, for the 24 h soak (T8.4) and for confirming that the web
+     * task still has stack to spare (T8.2). This handler runs on the web
+     * server's own task, so uxTaskGetStackHighWaterMark(NULL) is that task's
+     * smallest free stack since boot - the quantity that was blown through when
+     * /api/events kept its event-log snapshot on the stack. The heap figures
+     * cover internal RAM only, which is what HomeKit, the web server and the
+     * panel tasks allocate from; "min" is the low-water mark since boot. */
+    uint64_t uptime_ms = (uint64_t)(esp_timer_get_time() / 1000);
+    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t min_free_heap = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    UBaseType_t stack_words = uxTaskGetStackHighWaterMark(NULL);
+
     cJSON *root = cJSON_CreateObject();
     if (root == NULL ||
         cJSON_AddStringToObject(root, "version", app->version) == NULL ||
@@ -1553,7 +1585,16 @@ static esp_err_t system_info_handler(httpd_req_t *request)
         cJSON_AddNumberToObject(root, "update_partition_bytes",
                                 update == NULL ? 0 : (double)update->size) == NULL ||
         cJSON_AddBoolToObject(root, "wifi_connected", wifi_connected) == NULL ||
-        cJSON_AddBoolToObject(root, "panel_debug_enabled", debug_enabled) == NULL) {
+        cJSON_AddBoolToObject(root, "panel_debug_enabled", debug_enabled) == NULL ||
+        cJSON_AddNumberToObject(root, "uptime_ms", (double)uptime_ms) == NULL ||
+        cJSON_AddNumberToObject(root, "free_heap_bytes",
+                                (double)free_heap) == NULL ||
+        cJSON_AddNumberToObject(root, "min_free_heap_bytes",
+                                (double)min_free_heap) == NULL ||
+        cJSON_AddNumberToObject(root, "largest_heap_block_bytes",
+                                (double)largest_block) == NULL ||
+        cJSON_AddNumberToObject(root, "web_stack_free_bytes",
+                                (double)stack_words * sizeof(StackType_t)) == NULL) {
         cJSON_Delete(root);
         return send_error(request, "500 Internal Server Error",
                           "Response allocation failed");

@@ -176,8 +176,15 @@ change, and logout are under `/api/auth/`. Authenticated API endpoints:
 | `GET /api/debug/raw/stream` | Server-sent live stream of the same raw bytes (`event: raw`) |
 | `GET /api/debug/simulator` | Check whether the runtime recorded-frame test is available or running |
 | `POST /api/debug/simulator` | Start a one-shot recorded-frame test from the Debug tab |
-| `GET /api/system` | Firmware version, running/update slots, Wi-Fi connection and debug status |
+| `GET /api/system` | Firmware version, running/update slots, Wi-Fi connection, debug status, uptime, and memory headroom (`free_heap_bytes`, `min_free_heap_bytes`, `largest_heap_block_bytes`, `web_stack_free_bytes`) |
 | `POST /api/ota` | Stream a raw `application/octet-stream` firmware image into the inactive OTA slot |
+
+`GET /api/system` is the memory readout for long runs: it reports internal-RAM
+free bytes, the low-water mark since boot, the largest contiguous internal
+block, and the web server task's own smallest free stack since boot
+(`web_stack_free_bytes`). The Device tab shows the same figures, and a soak run
+is healthy when the low-water mark stays flat and the stack figure stays well
+above zero.
 
 The Debug tab can also mirror the panel UART byte-for-byte over Wi-Fi. The raw
 tap records every byte the UART task reads, including the bytes the decoder
