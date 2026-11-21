@@ -244,6 +244,92 @@ void test_decoder_rejects_bad_schema_and_invalid_values(void)
                           paradox_config_validate(&config));
 }
 
+/* The request-shape rules the web layer now delegates to: what a zone URI and
+ * a zone-edit body are allowed to say. Kept here because a rejected edit must
+ * be decided by these rules, not by esp_http_server code. */
+void test_zone_index_text_accepts_only_plain_one_to_sixteen(void)
+{
+    int index = 0;
+    for (int wanted = 1; wanted <= PARADOX_MAX_ZONES; wanted++) {
+        char text[8];
+        snprintf(text, sizeof(text), "%d", wanted);
+        index = -1;
+        TEST_ASSERT_TRUE_MESSAGE(paradox_config_zone_index_from_text(text, &index),
+                                 text);
+        TEST_ASSERT_EQUAL_INT(wanted, index);
+    }
+
+    static const char *const bad[] = {
+        "", "0", "17", "99", "1x", "x1", " 1", "1 ", "+1", "-1", "01", "007",
+        "1.0", "0x1", "1e2",
+        /* Long enough that a strtol-style parse would wrap back into range. */
+        "99999999999999999999",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        index = -1;
+        TEST_ASSERT_FALSE_MESSAGE(paradox_config_zone_index_from_text(bad[i], &index),
+                                  bad[i]);
+        TEST_ASSERT_EQUAL_INT(-1, index);
+    }
+
+    TEST_ASSERT_FALSE(paradox_config_zone_index_from_text(NULL, &index));
+    index = 5;
+    TEST_ASSERT_FALSE(paradox_config_zone_index_from_text("4", NULL));
+    TEST_ASSERT_EQUAL_INT(5, index);
+}
+
+void test_service_names_are_a_two_way_vocabulary(void)
+{
+    struct {
+        const char *name;
+        paradox_hk_service_t service;
+    } table[] = {
+        {"contact", PARADOX_HK_SERVICE_CONTACT},
+        {"motion", PARADOX_HK_SERVICE_MOTION},
+        {"smoke", PARADOX_HK_SERVICE_SMOKE},
+        {"leak", PARADOX_HK_SERVICE_LEAK},
+    };
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        TEST_ASSERT_EQUAL_STRING(table[i].name,
+                                 paradox_config_service_name(table[i].service));
+        paradox_hk_service_t parsed = PARADOX_HK_SERVICE_LEAK;
+        TEST_ASSERT_TRUE(paradox_config_service_from_name(table[i].name, &parsed));
+        TEST_ASSERT_EQUAL_INT(table[i].service, parsed);
+    }
+
+    /* Names are matched exactly, so a capitalised or padded variant is a
+     * different string rather than a tolerated spelling. */
+    static const char *const bad[] = {"Contact", "CONTACT", "smoke ", " smoke",
+                                      "", "unknown", "1", "smok"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        paradox_hk_service_t parsed = PARADOX_HK_SERVICE_CONTACT;
+        TEST_ASSERT_FALSE_MESSAGE(paradox_config_service_from_name(bad[i], &parsed),
+                                  bad[i]);
+        TEST_ASSERT_EQUAL_INT(PARADOX_HK_SERVICE_CONTACT, parsed);
+    }
+    paradox_hk_service_t parsed = PARADOX_HK_SERVICE_CONTACT;
+    TEST_ASSERT_FALSE(paradox_config_service_from_name(NULL, &parsed));
+    TEST_ASSERT_FALSE(paradox_config_service_from_name("smoke", NULL));
+
+    /* NULL is what the pure layer reports for a value no decoded config holds;
+     * the HTTP layer substitutes its own display string. */
+    TEST_ASSERT_NULL(paradox_config_service_name((paradox_hk_service_t)99));
+    TEST_ASSERT_NULL(paradox_config_service_name((paradox_hk_service_t)-1));
+}
+
+void test_zone_edit_field_whitelist(void)
+{
+    TEST_ASSERT_TRUE(paradox_config_zone_field_is_known("name"));
+    TEST_ASSERT_TRUE(paradox_config_zone_field_is_known("type"));
+    TEST_ASSERT_TRUE(paradox_config_zone_field_is_known("enabled"));
+    static const char *const bad[] = {"id", "open", "alarm", "Name", "Enabled",
+                                      "enabled ", "enabled\n", ""};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        TEST_ASSERT_FALSE_MESSAGE(paradox_config_zone_field_is_known(bad[i]), bad[i]);
+    }
+    TEST_ASSERT_FALSE(paradox_config_zone_field_is_known(NULL));
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -254,5 +340,8 @@ int main(void)
     RUN_TEST(test_v0_config_migrates_and_keeps_existing_values);
     RUN_TEST(test_v1_auth_hash_migrates_without_reusing_unsalted_hash);
     RUN_TEST(test_decoder_rejects_bad_schema_and_invalid_values);
+    RUN_TEST(test_zone_index_text_accepts_only_plain_one_to_sixteen);
+    RUN_TEST(test_service_names_are_a_two_way_vocabulary);
+    RUN_TEST(test_zone_edit_field_whitelist);
     return UNITY_END();
 }

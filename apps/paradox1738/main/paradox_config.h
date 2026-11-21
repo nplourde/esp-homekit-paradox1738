@@ -56,6 +56,28 @@ void paradox_config_defaults(paradox_config_t *config);
 paradox_config_result_t paradox_config_validate(const paradox_config_t *config);
 paradox_config_result_t paradox_config_set_zone_enabled(
     paradox_config_t *config, int zone_id, bool enabled);
+
+/* Request-shape rules, kept out of the HTTP layer so they can be tested
+ * without esp_http_server. These decide what a zone edit may say; whether the
+ * edit is then stored is paradox_config_update_zone's job, and it applies a
+ * multi-field edit to a candidate copy so a rejected field leaves the stored
+ * configuration untouched. */
+
+/* Digits-only zone index as it appears in /api/zones/{n}: ASCII digits, no
+ * sign, no whitespace, no leading zeros except a bare "0", and 1-16. Stricter
+ * than strtol(), which would also accept " 12" and "+12". */
+bool paradox_config_zone_index_from_text(const char *text, int *zone_id);
+
+/* The HomeKit service name used by GET /api/zones; NULL for an out-of-range
+ * service value, which never comes out of a decoded config. */
+const char *paradox_config_service_name(paradox_hk_service_t service);
+
+/* The exact-lowercase service name a PUT may send, or false to reject. */
+bool paradox_config_service_from_name(const char *name,
+                                      paradox_hk_service_t *service);
+
+/* Field names a zone-edit body may contain: name, type, enabled. */
+bool paradox_config_zone_field_is_known(const char *field);
 paradox_config_result_t paradox_config_update_zone(
     paradox_config_t *config, int zone_id, const char *name, bool update_name,
     int service, bool update_service, bool enabled, bool update_enabled);

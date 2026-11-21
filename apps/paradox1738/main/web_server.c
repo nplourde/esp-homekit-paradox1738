@@ -522,31 +522,12 @@ static esp_err_t send_json_object(httpd_req_t *request, cJSON *json)
     return err;
 }
 
+/* Rendering lives in the pure config module; only the display fallback for a
+ * service value that a decoded config cannot produce stays here. */
 static const char *service_name(paradox_hk_service_t service)
 {
-    switch (service) {
-    case PARADOX_HK_SERVICE_CONTACT: return "contact";
-    case PARADOX_HK_SERVICE_MOTION: return "motion";
-    case PARADOX_HK_SERVICE_SMOKE: return "smoke";
-    case PARADOX_HK_SERVICE_LEAK: return "leak";
-    default: return "unknown";
-    }
-}
-
-static bool parse_service(const char *name, int *service)
-{
-    if (strcmp(name, "contact") == 0) {
-        *service = PARADOX_HK_SERVICE_CONTACT;
-    } else if (strcmp(name, "motion") == 0) {
-        *service = PARADOX_HK_SERVICE_MOTION;
-    } else if (strcmp(name, "smoke") == 0) {
-        *service = PARADOX_HK_SERVICE_SMOKE;
-    } else if (strcmp(name, "leak") == 0) {
-        *service = PARADOX_HK_SERVICE_LEAK;
-    } else {
-        return false;
-    }
-    return true;
+    const char *name = paradox_config_service_name(service);
+    return name == NULL ? "unknown" : name;
 }
 
 static const char *class_name(paradox_class_t cls)
@@ -723,26 +704,16 @@ static bool parse_zone_id(const char *uri, int *zone_id)
     if (strncmp(uri, prefix, sizeof(prefix) - 1u) != 0) {
         return false;
     }
-    const char *digits = uri + sizeof(prefix) - 1u;
-    if (*digits == '\0') {
-        return false;
-    }
-    char *end = NULL;
-    long value = strtol(digits, &end, 10);
-    if (end == digits || *end != '\0' || value < 1 ||
-        value > PARADOX_MAX_ZONES) {
-        return false;
-    }
-    *zone_id = (int)value;
-    return true;
+    /* The digits rule is the pure module's, so index bounds are testable
+     * without esp_http_server. */
+    return paradox_config_zone_index_from_text(uri + sizeof(prefix) - 1u,
+                                               zone_id);
 }
 
 static bool json_has_only_zone_fields(const cJSON *json)
 {
     for (const cJSON *item = json->child; item != NULL; item = item->next) {
-        if (strcmp(item->string, "name") != 0 &&
-            strcmp(item->string, "type") != 0 &&
-            strcmp(item->string, "enabled") != 0) {
+        if (!paradox_config_zone_field_is_known(item->string)) {
             return false;
         }
     }
@@ -769,11 +740,12 @@ static esp_err_t zone_put_handler(httpd_req_t *request)
     cJSON *name_item = cJSON_GetObjectItemCaseSensitive(json, "name");
     cJSON *type_item = cJSON_GetObjectItemCaseSensitive(json, "type");
     cJSON *enabled_item = cJSON_GetObjectItemCaseSensitive(json, "enabled");
-    int service = 0;
+    paradox_hk_service_t service = PARADOX_HK_SERVICE_CONTACT;
     if ((name_item != NULL && !cJSON_IsString(name_item)) ||
         (type_item != NULL &&
          (!cJSON_IsString(type_item) ||
-          !parse_service(type_item->valuestring, &service))) ||
+          !paradox_config_service_from_name(type_item->valuestring,
+                                           &service))) ||
         (enabled_item != NULL && !cJSON_IsBool(enabled_item)) ||
         (name_item == NULL && type_item == NULL && enabled_item == NULL)) {
         delete_json_strings(json);
@@ -790,7 +762,7 @@ static esp_err_t zone_put_handler(httpd_req_t *request)
     result = paradox_config_update_zone(
         &candidate, zone_id,
         name_item == NULL ? NULL : name_item->valuestring,
-        name_item != NULL, service, type_item != NULL,
+        name_item != NULL, (int)service, type_item != NULL,
         enabled_item != NULL && cJSON_IsTrue(enabled_item),
         enabled_item != NULL);
     if (result == PARADOX_CONFIG_OK) {

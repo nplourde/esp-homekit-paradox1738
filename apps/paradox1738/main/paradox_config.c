@@ -1,5 +1,6 @@
 #include "paradox_config.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -97,6 +98,80 @@ paradox_config_result_t paradox_config_set_zone_enabled(
         zone->enabled = enabled;
     }
     return result;
+}
+
+bool paradox_config_zone_index_from_text(const char *text, int *zone_id)
+{
+    if (text == NULL || zone_id == NULL) {
+        return false;
+    }
+    const char *digit = text;
+    if (*digit == '\0') {
+        return false;
+    }
+    if (digit[0] == '0' && digit[1] != '\0') {
+        return false;
+    }
+    int value = 0;
+    for (; *digit != '\0'; digit++) {
+        if (*digit < '0' || *digit > '9') {
+            return false;
+        }
+        /* Reject before overflowing, so an absurd URI cannot wrap into range. */
+        if (value > (INT_MAX - 9) / 10) {
+            return false;
+        }
+        value = value * 10 + (*digit - '0');
+    }
+    if (value < 1 || value > PARADOX_MAX_ZONES) {
+        return false;
+    }
+    *zone_id = value;
+    return true;
+}
+
+const char *paradox_config_service_name(paradox_hk_service_t service)
+{
+    switch (service) {
+    case PARADOX_HK_SERVICE_CONTACT: return "contact";
+    case PARADOX_HK_SERVICE_MOTION: return "motion";
+    case PARADOX_HK_SERVICE_SMOKE: return "smoke";
+    case PARADOX_HK_SERVICE_LEAK: return "leak";
+    default: return NULL;
+    }
+}
+
+bool paradox_config_service_from_name(const char *name,
+                                      paradox_hk_service_t *service)
+{
+    static const struct {
+        const char *name;
+        paradox_hk_service_t service;
+    } table[] = {
+        {"contact", PARADOX_HK_SERVICE_CONTACT},
+        {"motion", PARADOX_HK_SERVICE_MOTION},
+        {"smoke", PARADOX_HK_SERVICE_SMOKE},
+        {"leak", PARADOX_HK_SERVICE_LEAK},
+    };
+    if (name == NULL || service == NULL) {
+        return false;
+    }
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        if (strcmp(name, table[i].name) == 0) {
+            *service = table[i].service;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool paradox_config_zone_field_is_known(const char *field)
+{
+    if (field == NULL) {
+        return false;
+    }
+    return strcmp(field, "name") == 0 || strcmp(field, "type") == 0 ||
+           strcmp(field, "enabled") == 0;
 }
 
 paradox_config_result_t paradox_config_set_zone_service(
