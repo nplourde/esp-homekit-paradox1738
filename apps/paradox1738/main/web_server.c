@@ -1770,7 +1770,20 @@ static esp_err_t login_handler(httpd_req_t *request)
         return send_error(request, "500 Internal Server Error",
                           "Session could not be created");
     }
-    return auth_status_handler(request);
+    /* auth_status_handler() reports the session of the request it is handed,
+     * and this request is the one that has no cookie yet - the session is only
+     * being set in the response. Answer for the login itself instead, or a
+     * client that reads the login response sees authenticated:false after a
+     * successful sign-in. */
+    char body[96];
+    int length = snprintf(body, sizeof(body),
+                          "{\"password_change_required\":%s,\"authenticated\":true}",
+                          s_config->web_auth_password_set ? "false" : "true");
+    if (length < 0 || (size_t)length >= sizeof(body)) {
+        return send_error(request, "500 Internal Server Error",
+                          "Authentication status unavailable");
+    }
+    return send_json(request, body);
 }
 
 static esp_err_t change_password_handler(httpd_req_t *request)

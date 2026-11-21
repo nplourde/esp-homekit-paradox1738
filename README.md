@@ -153,7 +153,12 @@ each such boot, and you should change it to a new password of 4–128 printable
 ASCII characters right after signing in. The password
 is stored in NVS as a salted PBKDF2-HMAC-SHA256 hash. Sessions use random
 256-bit tokens, expire after 30 minutes, and are held in an HttpOnly,
-SameSite=Strict cookie. Failed logins are temporarily rate-limited.
+SameSite=Strict cookie. Five consecutive failed logins lock the login endpoint
+out for 60 seconds, which answers `429 Too Many Requests` with
+`{"error":"Try again later"}`; other authenticated endpoints are unaffected. A
+successful `POST /api/auth/login` answers `{"password_change_required":false,
+"authenticated":true}` - the session cookie is only in the response headers, so
+`GET /api/auth/status` on a later request is what reports the live session.
 
 To reset a forgotten web password, hold BOOT for more than 10 seconds to invoke
 the factory-reset path. It clears the admin hash and HomeKit data; the next boot
