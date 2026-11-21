@@ -61,6 +61,7 @@ make latency HOST=<address>   # measure decode-to-push delay on a real panel
 make robust HOST=<address>    # malformed and unauthorized requests against a module
 make timeline HOST=<address>  # record what the bridge publishes while you trigger zones
 make consistency HOST=<address> # check the HomeKit database against GET /api/status
+make audit HOST=<address> PHASE=boot # read what the bridge recorded about its own requests
 ```
 
 - `test/host/` — Unity unit tests for pure logic, compiled with the host `gcc`
@@ -104,6 +105,21 @@ make consistency HOST=<address> # check the HomeKit database against GET /api/st
   compared values were expected to be 1: an agreement made only of zeros proves little, and the
   self-test (57 checks) runs against responses copied verbatim off a module plus disagreements
   injected on purpose.
+- `test/device/audit_trail.py` (`make audit HOST=<address> PHASE=boot|write|refusals|restart`) —
+  reads the bridge's record of what it was asked to do and holds it to account: does the trail begin
+  at a boot and say so, does a zone rename show up as a record naming who did it (with the
+  cross-origin attempt at the same write recorded beside it), do the robustness battery's refusals
+  appear with the ring admitting how many older records aged out, and what does the restart control
+  do to the trail. It has no `--self-test` because nothing in it decides anything about the device -
+  the judgement lives in `paradox_audit.c`, which is host tested instead.
+- The command record never trusts its own inputs (`test/host/test_audit.c`, 12 assertions): a hostile
+  path cannot forge a record or break the JSON, because every field is confined to printable ASCII,
+  an over-long value is truncated with a marker rather than dropped, and the renderer refuses a buffer
+  that is too small instead of emitting half a record. Writing it turned up two defects: the
+  truncation marker spent the terminator byte and so wrote one byte past its own field into the next,
+  and asking `request_is_authorized()` who the principal was turned out to answer the request with a
+  401 or 403 on the way to saying no - a defect the host suite could not see and the on-device battery
+  caught on its first run.
 - Request bodies are bounded before the JSON parser sees them: 512 bytes, and at
   most eight levels of nested containers (`test/host/test_json_guard.c` covers the
   counting, including brackets that sit inside strings). cJSON recurses once per
@@ -245,6 +261,7 @@ change, and logout are under `/api/auth/`. Authenticated API endpoints:
 | `PUT /api/debug` | Set `{"enabled":true}` or `{"enabled":false}` |
 | `GET /api/debug/panel` | Recent raw frames and decoder counters; available only when panel debug is enabled |
 | `GET /api/debug/raw?bytes=N` | Verbatim panel UART bytes as hex, newest last, plus ring statistics; available only when panel debug is enabled |
+| `GET /api/audit` | The bridge's own record of the requests made of it, newest first: sequence number, uptime, whether the requester held a session, method, path, status, and a note. Read-only and authenticated |
 | `GET /api/debug/homekit` | The values the esp-hap accessory database currently holds for every sensor service - state characteristic, StatusFault, StatusTampered, and StatusActive where present - so the HomeKit view can be compared with `GET /api/status` without a paired controller; available only when panel debug is enabled |
 | `GET /api/debug/raw/stream` | Server-sent live stream of the same raw bytes (`event: raw`) |
 | `GET /api/debug/simulator` | Check whether the runtime recorded-frame test is available or running |
@@ -368,6 +385,22 @@ device to answer `/api/health` again and reloads. Pairing is not at risk - the k
 live in NVS, and `mDNS` keeps answering `_hap._tcp` with `sf=0` (paired and idle)
 across the restart. The `robustness` battery keeps the refusals pinned: no session,
 cross-origin, wrong method, and every way of not saying confirm.
+
+The bridge also keeps a record of what it was asked to do, and reads it back over
+`GET /api/audit`. The recording point is the function whose job is to refuse, so a
+refusal cannot be missed by being recorded in the wrong place, and a new endpoint
+inherits the record for free. Requests that no route matches are recorded too - a
+`POST` aimed at an arm command the bridge refuses to have is exactly what the
+record should show - while ordinary reads are not, because a browser polling the
+dashboard would push interesting records out of a 16-deep ring. The trail never
+contains a request body, a password or a token, and every field is confined to
+printable ASCII so a hostile path cannot forge a record or break the JSON.
+It is 16 records deep, it names its own capacity and its next sequence number so a
+reader can tell that records aged out rather than that nothing happened, and it is
+currently **RAM-only**: a reboot - including the restart button above - starts it
+again at sequence 1. Persisting it across reboots is an open work item
+(`audit_trail_persistence` in `TODO.md`), and it is a requirement before anything
+can send commands to the panel.
 The authenticated Debug tab can run a short recorded-frame replay through the
 normal decoder, state, and HomeKit paths. Live UART reads pause during the
 replay, buffered panel traffic is processed afterward, and the previous HomeKit

@@ -18,4 +18,12 @@
 #define TEST_ASSERT_EQUAL_SIZE_MESSAGE(expected, actual, message) \
     TEST_ASSERT_EQUAL_UINT64_MESSAGE((uint64_t)(expected), (uint64_t)(actual), (message))
 
+/* Same for a size_t floor: the bare Unity macro for this only exists for the
+ * fixed-width families. */
+#define TEST_ASSERT_GREATER_THAN_SIZE(minimum, actual) \
+    TEST_ASSERT_GREATER_THAN_UINT64((uint64_t)(minimum), (uint64_t)(actual))
+
+#define TEST_ASSERT_GREATER_THAN_SIZE_MESSAGE(minimum, actual, message) \
+    TEST_ASSERT_GREATER_THAN_UINT64_MESSAGE((uint64_t)(minimum), (uint64_t)(actual), (message))
+
 #endif /* UNITY_COMPAT_H */

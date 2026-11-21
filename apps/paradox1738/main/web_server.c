@@ -22,6 +22,7 @@
 #include "mbedtls/pkcs5.h"
 #include "mbedtls/platform_util.h"
 
+#include "paradox_audit.h"
 #include "paradox_event_log.h"
 #include "paradox_json_guard.h"
 #include "paradox_raw_tap.h"
@@ -334,11 +335,68 @@ static esp_err_t send_json(httpd_req_t *request, const char *json)
     return httpd_resp_sendstr(request, json);
 }
 
+static const char *method_name(httpd_method_t method)
+{
+    switch (method) {
+    case HTTP_GET: return "GET";
+    case HTTP_POST: return "POST";
+    case HTTP_PUT: return "PUT";
+    case HTTP_DELETE: return "DELETE";
+    case HTTP_HEAD: return "HEAD";
+    case HTTP_OPTIONS: return "OPTIONS";
+    case HTTP_PATCH: return "PATCH";
+    default: return "OTHER";
+    }
+}
+
+/* One credential exists today, so the honest answer is admin or anonymous. The
+ * field is here now so that the split into operator and admin does not have to
+ * retrofit a trail that recorded nobody, and so that a refusal is visibly a
+ * refusal by someone who was not who they claimed to be.
+ *
+ * The principal has to be read without replying to the request. The tempting
+ * predicate is request_is_authorized(), and it is a trap: it is not a pure
+ * question, it answers the request with a 401 or 403 on the way to returning
+ * false. Asking it inside the recorder replaced every unauthenticated response -
+ * including a successful sign-in - with an error, which is what the robustness
+ * battery caught on hardware. request_has_session() is the side-effect-free
+ * question, and it is also the more truthful one for a record: a cross-origin
+ * refusal was still made by someone holding a session, and the status says 403. */
+static bool request_has_session(httpd_req_t *request);
+
+static const char *request_principal(httpd_req_t *request)
+{
+    return request_has_session(request) ? "admin" : "anonymous";
+}
+
+/* Records the request line, never the request body. A body is where a password
+ * lives, and nothing the trail has to prove needs one: which zone, which command
+ * and what was decided is all in the fields. paradox_audit.c keeps every field
+ * inside printable ASCII, so a client cannot forge a record boundary. */
+static void web_audit(httpd_req_t *request, const char *status, const char *note)
+{
+    paradox_audit_record(esp_timer_get_time() / 1000, request_principal(request),
+                         method_name(request->method), request->uri, status, note);
+}
+
 static esp_err_t send_error(httpd_req_t *request, const char *status,
                             const char *message)
 {
     httpd_resp_set_hdr(request, "Connection", "close");
     httpd_resp_set_status(request, status);
+    /* Every refusal the web layer makes passes through this function, which is why
+     * the record belongs here rather than in the handlers: a refusal cannot be
+     * missed by being recorded in the wrong place, and a new endpoint inherits the
+     * record without its author remembering to add one. Reads are excluded because
+     * a browser polling /api/status would fill the 16 records before anything
+     * interesting happened, and the question is always about a write. */
+    if (request->method != HTTP_GET && request->method != HTTP_HEAD) {
+        char code[4] = {'?', '?', '?', '\0'};
+        for (size_t i = 0; i < 3u && status[i] != '\0'; ++i) {
+            code[i] = status[i];
+        }
+        web_audit(request, code, "refused");
+    }
     /* Two ways this used to turn a caller's correct 4xx into a misleading 500: a
      * message longer than the buffer, and a message carrying a double quote, which
      * lands raw inside the JSON and makes the body unparsable. Messages are kept
@@ -885,6 +943,9 @@ static esp_err_t zone_put_handler(httpd_req_t *request)
     /* The write is in NVS and visible to the API from here on, but HomeKit is
      * showing the accessories as they were when the bridge built them. */
     s_homekit_pending = true;
+    char note[PARADOX_AUDIT_NOTE_MAX];
+    snprintf(note, sizeof(note), "zone %d configuration written", zone_id);
+    web_audit(request, "200", note);
     cJSON *response = cJSON_CreateObject();
     if (response == NULL ||
         cJSON_AddBoolToObject(response, "ok", true) == NULL ||
@@ -1062,6 +1123,7 @@ static esp_err_t events_clear_handler(httpd_req_t *request)
         return ESP_OK;
     }
     paradox_event_log_clear();
+    web_audit(request, "200", "panel event log cleared");
     return send_json(request, "{\"ok\":true}");
 }
 
@@ -1111,6 +1173,9 @@ static esp_err_t debug_set_handler(httpd_req_t *request)
         return send_error(request, "500 Internal Server Error",
                           "Debug setting could not be saved");
     }
+    web_audit(request, "200", candidate.panel_debug_enabled
+                                      ? "panel debug enabled"
+                                      : "panel debug disabled");
     return send_json(request, "{\"ok\":true}");
 }
 
@@ -1145,6 +1210,7 @@ static esp_err_t debug_simulator_start_handler(httpd_req_t *request)
         return send_error(request, "409 Conflict",
                           "Simulator test is already running");
     }
+    web_audit(request, "202", "panel simulator replay started");
     httpd_resp_set_status(request, "202 Accepted");
     return send_json(request, "{\"ok\":true,\"active\":true}");
 }
@@ -1797,6 +1863,9 @@ static esp_err_t ota_upload_handler(httpd_req_t *request)
         return send_error(request, "500 Internal Server Error",
                           "Firmware image could not be selected");
     }
+    /* The image has been written to the inactive slot and validated; from here the
+     * module reboots into it, so this is the record of the decision. */
+    web_audit(request, "202", "firmware image accepted");
     esp_err_t response_err = httpd_resp_set_status(request, "202 Accepted");
     if (response_err == ESP_OK) {
         response_err = send_json(request, "{\"ok\":true,\"restarting\":true}");
@@ -1860,6 +1929,7 @@ static esp_err_t homekit_restart_handler(httpd_req_t *request)
         return send_error(request, "500 Internal Server Error",
                           "Restart status unavailable");
     }
+    web_audit(request, "202", "bridge restart confirmed");
     esp_err_t response_err = httpd_resp_set_status(request, "202 Accepted");
     if (response_err == ESP_OK) {
         response_err = send_json(request, body);
@@ -1874,6 +1944,56 @@ static esp_err_t homekit_restart_handler(httpd_req_t *request)
     vTaskDelay(pdMS_TO_TICKS(1000));
     esp_restart();
     return response_err;
+}
+
+/* The bridge's own record of what it was asked to do, newest first. Read-only and
+ * authenticated: the trail names who was refused, which is exactly what should not
+ * be readable by a stranger. It is deliberately not affected by the panel-debug
+ * switch, because the reason someone wants it is usually that something unexpected
+ * already happened. */
+#define WEB_AUDIT_JSON_BYTES 4096u
+
+/* esp_http_server answers an unmatched URI or method by itself, so those refusals
+ * never reach send_error() and would be invisible in the trail. The asymmetry is
+ * worth closing on one side only: a POST to a route that does not exist yet is
+ * precisely the attempt a control-plane audit has to show (an arm command aimed at
+ * a bridge that refuses to have one), and a request using the wrong verb against a
+ * route that does exist is a probe rather than a mistake. A GET that hits nothing
+ * is not recorded, because a browser typo, a favicon request or a scan would push
+ * real records out of a 16-deep ring. */
+static esp_err_t unmatched_route_handler(httpd_req_t *request, httpd_err_code_t error)
+{
+    const bool wrong_method = (error == HTTPD_405_METHOD_NOT_ALLOWED);
+    const bool read_only = (request->method == HTTP_GET ||
+                            request->method == HTTP_HEAD);
+    if (wrong_method || !read_only) {
+        web_audit(request, wrong_method ? "405" : "404", "no matching route");
+    }
+    httpd_resp_set_hdr(request, "Connection", "close");
+    httpd_resp_set_status(request, wrong_method ? "405 Method Not Allowed"
+                                                : "404 Not Found");
+    return send_json(request, "{\"error\":\"No such route\"}");
+}
+
+static esp_err_t audit_get_handler(httpd_req_t *request)
+{
+    if (!request_is_authorized(request)) {
+        return ESP_OK;
+    }
+    char *body = malloc(WEB_AUDIT_JSON_BYTES);
+    if (body == NULL) {
+        return send_error(request, "503 Service Unavailable",
+                          "No memory for the audit trail");
+    }
+    const size_t length = paradox_audit_json(body, WEB_AUDIT_JSON_BYTES);
+    if (length == 0u) {
+        free(body);
+        return send_error(request, "503 Service Unavailable",
+                          "Audit trail does not fit the response buffer");
+    }
+    const esp_err_t err = send_json(request, body);
+    free(body);
+    return err;
 }
 
 static esp_err_t auth_status_handler(httpd_req_t *request)
@@ -1953,6 +2073,10 @@ static esp_err_t login_handler(httpd_req_t *request)
      * being set in the response. Answer for the login itself instead, or a
      * client that reads the login response sees authenticated:false after a
      * successful sign-in. */
+    /* A signed-in is a record too: "someone succeeded" is the other half of a
+     * brute-force trail, and the login lockout is only believable if the successes
+     * are visible next to the failures. */
+    web_audit(request, "200", "web session issued");
     char body[96];
     int length = snprintf(body, sizeof(body),
                           "{\"password_change_required\":%s,\"authenticated\":true}",
@@ -2040,6 +2164,7 @@ static esp_err_t change_password_handler(httpd_req_t *request)
         return send_error(request, "500 Internal Server Error",
                           "Password could not be saved");
     }
+    web_audit(request, "200", "web password changed");
     return send_json(request, "{\"ok\":true}");
 }
 
@@ -2062,6 +2187,7 @@ static esp_err_t logout_handler(httpd_req_t *request)
         return send_error(request, "500 Internal Server Error",
                           "Session cookie could not be cleared");
     }
+    web_audit(request, "200", "web session ended");
     return send_json(request, "{\"ok\":true}");
 }
 
@@ -2151,6 +2277,14 @@ esp_err_t web_server_start(paradox_config_t *config)
     }
     s_server_running = true;
 
+    /* The trail starts empty at every boot, and says so. A reader who finds only
+     * this record knows the bridge began here rather than that nothing was ever
+     * asked of it - which matters because the trail is 16 records deep and a
+     * reader cannot otherwise tell an empty device from a busy one. */
+    paradox_audit_reset();
+    paradox_audit_record(esp_timer_get_time() / 1000, "system", "-", "-", "-",
+                         "web server started");
+
     const httpd_uri_t uris[] = {
         {.uri = "/", .method = HTTP_GET, .handler = index_handler},
         {.uri = "/api/health", .method = HTTP_GET, .handler = health_handler},
@@ -2188,6 +2322,7 @@ esp_err_t web_server_start(paradox_config_t *config)
          .handler = debug_raw_stream_handler},
         {.uri = "/api/homekit/restart", .method = HTTP_POST,
          .handler = homekit_restart_handler},
+        {.uri = "/api/audit", .method = HTTP_GET, .handler = audit_get_handler},
     };
     /* Compile time, because the failure at run time is not a degraded page: it is a
      * dead web server. HomeKit keeps working through it, which is what makes the
@@ -2205,6 +2340,23 @@ esp_err_t web_server_start(paradox_config_t *config)
             s_config = NULL;
             return err;
         }
+    }
+    /* Unmatched requests are answered by esp_http_server unless a handler is
+     * registered, and an unanswered refusal is an unrecorded refusal. */
+    err = httpd_register_err_handler(s_server, HTTPD_404_NOT_FOUND,
+                                     unmatched_route_handler);
+    if (err == ESP_OK) {
+        err = httpd_register_err_handler(s_server, HTTPD_405_METHOD_NOT_ALLOWED,
+                                         unmatched_route_handler);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Cannot register the unmatched-route recorder: %s",
+                 esp_err_to_name(err));
+        s_server_running = false;
+        httpd_stop(s_server);
+        s_server = NULL;
+        s_config = NULL;
+        return err;
     }
     ESP_LOGI(TAG, "HTTP server started on port %u", server_config.server_port);
     return ESP_OK;

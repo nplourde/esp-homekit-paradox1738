@@ -28,3 +28,4 @@ soak.csv
 soak-*.csv
 latency.csv
 homekit-timeline.csv
+soak-*.log

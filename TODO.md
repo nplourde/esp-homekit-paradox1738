@@ -27,7 +27,7 @@ Every milestone lists the work items it contains **and** the tests that must pas
 | M6 | Web APIs for config, status, log, debug | 4 | 8 | [x] |
 | M7 | Web UI and firmware update | 3 | 8 | [~] |
 | M8 | Integrated release on real hardware | 5 | 7 | [~] |
-| M9 | Panel control direction - observe, capture, then write | 6 | 7 | [ ] |
+| M9 | Panel control direction - observe, capture, then write | 7 | 7 | [~] |
 
 ## Ready to start (no open prerequisites)
 
@@ -36,7 +36,10 @@ finished long ago (M3, M2, M1); the list had simply gone stale and said otherwis
 open and can genuinely start with nothing waiting on it:
 
 - [ ] `arm_state_observe` (M9) - one keypad arm and one disarm; sends no bytes out
-- [ ] `control_plane_auth` (M9) - code work, and it must land before any TX code does
+- [ ] `control_plane_auth` (M9) - half built now (the command record); the credential halves
+  are code work, and must land before any TX code does
+- [ ] `audit_trail_persistence` (M9) - code work: the command record is RAM-only, so the
+  bridge restart control wipes it along with every reboot, OTA and power cut
 - [ ] `power-cycle` (M8) - needs someone at the wall socket
 - Partial, waiting on a person rather than on code: `docs-wiring` (M8), `homekit-verify` (M8),
   T3.5 bypass in Home, T3.6 StatusActive/StatusTampered, T7.2 edits driven through the browser
@@ -712,12 +715,68 @@ The observe and capture stages send zero bytes.
   cancels an alarm. Reuse the raw tap and the hex view already in the panel-debug API, and put the
   captured frames into the recorded-frame store so that decoding them becomes a host test. The framing,
   sequence and acknowledgement rules are all unknown: this item's whole output is evidence.
-- [ ] `control_plane_auth` — Credentials before any TX code exists
+- [~] `control_plane_auth` — Credentials before any TX code exists
   The LAN UI is one shared password over plain HTTP with a 5-failure/60 s lockout, and its default is
   `admin`. Before anything can disarm the house: no default password, operator and admin credentials
   split so an operator cannot rewrite configuration, network control behind an NVS opt-in that ships
   off, and a bridge-side record of every command so it lines up with the panel's own audit trail -
   EventId 13 and 15 carry which code was used.
+  **The record half is built; the credential half is not.** A command record written only when a
+  command is accepted is worth little - "someone tried to disarm the house and was refused" is the
+  entry that matters - so the recording point is `send_error()`, the single function whose job is to
+  refuse. A refusal cannot be missed by being recorded in the wrong place, and a new endpoint
+  inherits the record without its author remembering to add one. Reads are excluded on purpose: a
+  browser polling `/api/status` would fill a 16-record ring before anything interesting happened.
+  `esp_http_server` answers an unmatched URI or verb by itself, so those refusals never reached
+  `send_error()` and were invisible: a `POST` aimed at an arm route the bridge refuses to have
+  produced nothing at all. Registered error handlers now record the wrong-verb case and the
+  unmatched-write case, and still ignore a `GET` that hits nothing, because browser typos, favicon
+  requests and scans would otherwise push real records out of the ring.
+  *Evidence (bench board, flashed with `app-flash`):* `make smoke` PASS, 217 log lines, no
+  error-level line. `make robust` PASS, 62 cases, no reboot, zone configuration bytes unchanged. Then
+  `make audit HOST=192.168.4.62 PHASE=...`: the trail begins at sequence 1 with
+  `system - - - web server started`, so an empty-looking trail is distinguishable from a busy device;
+  renaming zone 16 through the API recorded `admin PUT /api/zones/16 -> 200 (zone 16 configuration
+  written)`; the cross-origin attempt at the same write recorded as
+  `admin PUT /api/zones/16 -> 403 (refused)`, which is the truth rather than a flattering reading -
+  the request carried a session, it was the origin that was wrong. After the 62-case battery the
+  window holds 11 refusals with 55 older records aged out, and the document names its own capacity
+  and its `next_sequence` so a reader knows records went away instead of assuming nothing happened.
+  Because the ring is shallow, that phase also watches a refusal happen live rather than trusting the
+  window: a bad sign-in recorded as `anonymous POST /api/auth/login -> 401 (refused)`, immediately
+  followed by the good one as `200 (web session issued)` - the lockout is only believable if the
+  successes sit next to the failures.
+  **Two defects found on the way, recorded rather than quietly fixed.** The field sanitizer spent
+  the terminator byte on its own truncation marker, so a long path wrote one byte past its own field
+  into the next: the host suite saw a 64-byte path read back as 67 characters because it had run into
+  the status field. And asking `request_is_authorized()` who the principal was turned out to be a
+  trap: it is not a question, it *answers* the request with a 401 or 403 on the way to returning
+  false, so the recorder replaced every unauthenticated response - including a successful sign-in -
+  with an error. The host suite could not see that at all; the 62-case battery caught it on hardware
+  on the first run, which is precisely what the device layer is for. `request_has_session()` is the
+  side-effect-free question, and it also records truer things.
+  What is left here is the credential half: no default password (which needs a first-run story, since
+  an open "create password" form on the house LAN is itself an attack surface - the design is to offer
+  it only while no password is set *and* the bridge is in its provisioning state), the operator/admin
+  split, and the NVS opt-in. The record fields already carry a principal, so the split does not have
+  to retrofit a trail that recorded nobody.
+  *Depends on:* `web-auth`, `api-zone-config` (the surface being recorded); blocks `panel_write_path`
+- [ ] `audit_trail_persistence` — Keeping the command record through a reboot
+  The trail is RAM-only, and the measurement of what that costs was made rather than guessed: with 75
+  records in it, `POST /api/homekit/restart` brought the bridge back with 2 entries and
+  `next_sequence` 3. The control that applies a zone edit is therefore also the control that erases
+  the record of what was done, and so does every OTA, every reboot and pulling the module out of the
+  wall. For a sensor bridge that is a wart; for a control plane it is disqualifying, because the
+  person who could cause a reboot is the person who wants the record gone.
+  Shape of the fix: `esp_register_shutdown_handler()` runs on `esp_restart()`, so the reboot paths can
+  flush the ring to NVS; a power cut needs a periodic flush as well, and at the current request volume
+  that is a handful of writes of at most ~2.6 KiB a day, which NVS wear levelling absorbs. It needs a
+  separate namespace and a versioned blob - never inside the zone-configuration blob, because a
+  corrupt trail must not be able to cost the zone configuration its own restore. On boot, load the
+  previous records and continue the sequence number, so a reader sees continuity across a reboot with
+  the boot record marking the boundary rather than a trail that restarts at 1 and looks like a device
+  that has never been asked for anything.
+  *Depends on:* `control_plane_auth`
 - [ ] `panel_write_path` — Sending commands, on a bench panel
   Command builder, sequence and timing rules, and reading the panel's confirmation events back on the TX
   side. Experiments happen on a spare panel, or with the protected panel's bus disconnected, never while
@@ -732,7 +791,7 @@ The observe and capture stages send zero bytes.
 | T9.3 | Dashboard reports arming state | device | Watch the dashboard across an arm and a disarm at the keypad, then reboot the module and look again. | The state follows the panel event within about 2 s; after a reboot the dashboard says arming state is unknown until the next event instead of showing a stale value. |
 | T9.4 | HomeKit surface decision recorded | manual | Check what Home can show for a partition without a writable TargetSecurityState. | A written decision with the reason, and the alternative surfaces named. |
 | T9.5 | Captured keypad frames decode with the existing decoder | device | Capture RX-side frames for arm, disarm and cancel from a keypad session, then run them through the host decoder. | Every captured frame decodes to named fields, or the bytes that do not decode are recorded as an open framing question. No TX involved. |
-| T9.6 | The control plane refuses strangers | security | With network control off, request an arm; try the default password; try an operator credential against config-write endpoints. | Control refused with a clear 4xx while the opt-in is off; default password refused; an operator credential cannot write config; each attempt recorded. |
+| T9.6 | The control plane refuses strangers | security | With network control off, request an arm; try the default password; try an operator credential against config-write endpoints. | Control refused with a clear 4xx while the opt-in is off; default password refused; an operator credential cannot write config; each attempt recorded. | [~] The recording clause holds against the surface that exists today, and it holds for requests that no route matches as well as for requests a handler refuses: `make robust` produces 62 refusals and the trail shows them with method, path, status, whether the requester held a session, and the sequence gap that says older records aged out; `make audit PHASE=refusals` also watches a live bad sign-in appear as `anonymous POST /api/auth/login -> 401 (refused)`. The other three clauses have nothing to test against yet: there is no network-control opt-in to be off, the default password is still `admin`, and there is one credential rather than an operator and an admin. |
 | T9.7 | A bridge-initiated arm is confirmed by the panel | device | On a bench panel, send the captured arm frame and watch the panel's own TX-side events. | The panel's Arm event appears on the TX side within about 2 s; a wrong code produces the panel's reject event and the bridge reports it; the panel returns to its previous state. |
 
 ---

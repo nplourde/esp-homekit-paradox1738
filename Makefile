@@ -20,6 +20,10 @@
 #   make timeline       # record every HomeKit-mirrored change while you trigger
 #                     zones physically (T3.5, T3.6, T7.3, T8.1); HOST= required,
 #                     run it in a terminal you can watch, not in the background
+#   make consistency  # compare GET /api/status against the bridge's own HomeKit
+#                     accessory database (T6.5); HOST= required, SAMPLES= to repeat
+#   make audit        # read the bridge's record of what it was asked to do (T9.6);
+#                     HOST= and PHASE=boot|write|refusals|restart are required
 
 APP          := apps/paradox1738
 HOST_TEST_DIR := test/host
@@ -30,11 +34,12 @@ DURATION     ?= 86400
 OUT          ?= soak.csv
 TIMELINE_OUT ?= homekit-timeline.csv
 SAMPLES      ?= 8
+PHASE        ?= boot
 
 # IDF_PATH must be exported for idf.py; point it at the local checkout.
 export IDF_PATH ?= $(HOME)/Source/esp-idf
 
-.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest timeline timeline-selftest consistency consistency-selftest clean distclean
+.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest timeline timeline-selftest consistency consistency-selftest audit clean distclean
 
 check: host-test smoke-selftest soak-selftest latency-selftest robust-selftest \
 	timeline-selftest consistency-selftest build build-sim
@@ -159,6 +164,11 @@ consistency:
 # comparison that ignored values could not pass.
 consistency-selftest:
 	@./test/device/homekit_consistency.py --self-test
+
+audit:
+	@test -n "$(HOST)" || { echo "audit: HOST=<device address> is required"; exit 2; }
+	@test -n "$(PHASE)" || { echo "audit: PHASE=boot|write|refusals|restart is required"; exit 2; }
+	@./test/device/audit_trail.py --host "$(HOST)" --phase "$(PHASE)"
 
 clean:
 	@$(MAKE) -C $(HOST_TEST_DIR) clean
