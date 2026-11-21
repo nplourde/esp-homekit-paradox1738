@@ -136,6 +136,17 @@ are not 5 V tolerant. Use a properly rated level interface and verify the
 panel's signal voltage and pin labels before connecting. The panel and ESP32
 must share ground.
 
+Whether the panel drives push-pull or is open-collector changes what has to be
+fitted, and it is still an open question on this install: if the panel's TX is
+open-collector, GPIO16 provides no pull-up once it becomes a UART RX input, so a
+line that looks connected can read continuously low. [docs/WIRING.md](docs/WIRING.md)
+records the pin map, the four multimeter readings and what each one implies,
+the DEBUG-build warning about the provisioning passphrase, the fact that
+credentials sit in plaintext in NVS while flash encryption is off, what the reset
+button destroys, and the difference between `app-flash` and a full flash. The
+measurement itself is T8.5, and it has been redefined: measure the signalling
+level rather than touch the line to the 5 V rail, which is a way to kill the board.
+
 ## HomeKit bridge status
 
 The current firmware registers a bridge, one bridged accessory for each enabled
