@@ -577,7 +577,14 @@ The whole stack flashed to the board, verified in Apple Home with physical zone 
   open/close/alarm/tamper and fire alarm/restore all update. Document any EventId that does not
   decode as expected. The device registered the complete accessory set (18 AIDs including the
   bridge) and the existing pairing/NVS was preserved; Apple Home display and physical trigger
-  checks remain.
+  checks remain. A rename across a reboot is now verified end to end under T6.2: Home showed the old
+  name until the bridge restarted and the new one after. What is left here is the characteristics half -
+  alarm, tamper and bypass on a zone, and the fire accessory going to Smoke Detected and back - read
+  from Apple Home while a physical trigger happens. `make timeline HOST=<address> DURATION=900` records
+  the device side of that pass: one row per open/alarm/tamper/bypass/fire change, with the device's own
+  stamps, so Home's behaviour is compared against two clocks instead of a memory. It must run in a
+  terminal you can watch - a process backgrounded into an agent session is killed between turns and
+  recorded a single row, which is how the first attempt at this went.
   *Depends on:* `build-flash-test`, `hk-fire-accessory`, `hk-zone-accessories`
 - [x] `sdkconfig-cleanup` — Reviewing sdkconfig.defaults for IDF 5.5.6
   Audit the defaults now that the project builds on v5.5.6: keep BT enabled for stock BLE provisioning, confirm the provisioning transport,

@@ -17,6 +17,9 @@
 #   make robust       # malformed-request battery: 4xx, no partial write, no reboot
 #                     # (T6.3 device half); HOST= required
 #   make robust-selftest # robustness judge's logic, no device needed
+#   make timeline       # record every HomeKit-mirrored change while you trigger
+#                     zones physically (T3.5, T3.6, T7.3, T8.1); HOST= required,
+#                     run it in a terminal you can watch, not in the background
 
 APP          := apps/paradox1738
 HOST_TEST_DIR := test/host
@@ -25,13 +28,14 @@ HOST         ?=
 INTERVAL     ?= 60
 DURATION     ?= 86400
 OUT          ?= soak.csv
+TIMELINE_OUT ?= homekit-timeline.csv
 
 # IDF_PATH must be exported for idf.py; point it at the local checkout.
 export IDF_PATH ?= $(HOME)/Source/esp-idf
 
-.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest clean distclean
+.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest timeline timeline-selftest clean distclean
 
-check: host-test smoke-selftest soak-selftest latency-selftest robust-selftest build build-sim
+check: host-test smoke-selftest soak-selftest latency-selftest robust-selftest timeline-selftest build build-sim
 	@echo "check: PASS"
 
 host-test:
@@ -117,6 +121,23 @@ robust:
 # The judging logic of the robustness battery, runnable with no device attached.
 robust-selftest:
 	@./test/device/robustness.sh --self-test
+
+# The checks that only a person can finish - trigger zones on the panel and read
+# Apple Home - need the device side recorded at the same moment. This holds the
+# status stream open and writes one CSV row per HomeKit-mirrored change (open,
+# alarm, tamper, bypass, fire) with the device's own stamps, so "did Home show it
+# in time" becomes a comparison of two clocks instead of a impression. Run it in a
+# terminal you can see; a backgrounded process that dies between turns records
+# nothing, which is how the first attempt ended.
+#   make timeline HOST=192.168.4.30 DURATION=900
+timeline:
+	@test -n "$(HOST)" || { echo "timeline: HOST=<device address> is required"; exit 2; }
+	@./test/device/homekit_timeline.py --host "$(HOST)" --duration $(DURATION) \
+		--out "$(TIMELINE_OUT)"
+
+# The row maths of the timeline recorder, runnable with no device attached.
+timeline-selftest:
+	@./test/device/homekit_timeline.py --self-test
 
 clean:
 	@$(MAKE) -C $(HOST_TEST_DIR) clean

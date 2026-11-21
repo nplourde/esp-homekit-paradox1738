@@ -59,6 +59,7 @@ make smoke FLASH=1  # flash first - overwrites whatever firmware is running
 make soak HOST=<address>      # watch memory, stack and resets over hours
 make latency HOST=<address>   # measure decode-to-push delay on a real panel
 make robust HOST=<address>    # malformed and unauthorized requests against a module
+make timeline HOST=<address>  # record what the bridge publishes while you trigger zones
 ```
 
 - `test/host/` — Unity unit tests for pure logic, compiled with the host `gcc`
@@ -78,10 +79,17 @@ make robust HOST=<address>    # malformed and unauthorized requests against a mo
   measures the delay from decoding a panel frame to publishing it using stamps the
   device puts in its own payloads. Needs real panel traffic; `--self-test` checks
   the maths.
-- `test/device/robustness.sh` (`make robust`) — replays 51 malformed, unauthorized
+- `test/device/robustness.sh` (`make robust`) — replays 54 malformed, unauthorized
   and cross-origin requests at a running module and fails if any is accepted, if the
   zone configuration changes by a byte, if a request goes unanswered, or if the
   module's uptime goes backwards. `--self-test` checks the case list.
+- `test/device/homekit_timeline.py` (`make timeline`) — for the checks that only a
+  person can finish: it holds the authenticated status stream open and writes one CSV
+  row whenever anything HomeKit mirrors changes (zone open, alarm, tamper, bypass, fire),
+  carrying the device's own `generation`/`pushed_ms` and each zone's `last_change_ms`. Run
+  it in a terminal while you walk the doors and watch Apple Home, then compare the two
+  timelines. It re-logs in when another client takes the single web session, and
+  `--self-test` checks which states it considers a change.
 - Request bodies are bounded before the JSON parser sees them: 512 bytes, and at
   most eight levels of nested containers (`test/host/test_json_guard.c` covers the
   counting, including brackets that sit inside strings). cJSON recurses once per
