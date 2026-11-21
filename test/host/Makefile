@@ -49,7 +49,8 @@ SRC_OBJS := $(patsubst src/%.c,$(BUILD)/src/%.o,$(SRC_SRCS))
 PURE_SRCS := $(APP_MAIN_DIR)/paradox_proto.c $(APP_MAIN_DIR)/paradox_config.c \
              $(APP_MAIN_DIR)/paradox_state.c \
              $(APP_MAIN_DIR)/paradox_event_log.c \
-             $(APP_MAIN_DIR)/paradox_raw_tap.c
+             $(APP_MAIN_DIR)/paradox_raw_tap.c \
+             $(APP_MAIN_DIR)/paradox_json_guard.c
 PURE_OBJS := $(patsubst $(APP_MAIN_DIR)/%.c,$(BUILD)/pure/%.o,$(PURE_SRCS))
 
 # The recorded-panel table is firmware data, and paradox_sim.c is host-safe,

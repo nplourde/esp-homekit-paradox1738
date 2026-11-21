@@ -218,6 +218,21 @@ def device_latency_pairs(events):
     return out
 
 
+def clients_back_to_zero(snapshot):
+    """True when the device reports both SSE session counts back at zero.
+
+    None means the firmware does not report them at all, so an older image is
+    recorded as unverified rather than silently passing.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    status = snapshot.get("status_stream_clients")
+    raw = snapshot.get("raw_stream_clients")
+    if status is None or raw is None:
+        return None
+    return status == 0 and raw == 0
+
+
 def run(args):
     client = Client(args.host, args.port)
     password = args.password or os.environ.get("PARADOX_WEB_PASSWORD")
@@ -321,6 +336,23 @@ def run(args):
     for thread in threads:
         thread.join(timeout=15)
 
+    # Each stream owns an async httpd request and a task of its own, so a client
+    # that goes away has to leave both behind. The device counts live streams in
+    # /api/debug/raw, and a stream only notices a gone client when its next send or
+    # 15 s heartbeat fails, so this waits instead of reading immediately.
+    streams_closed = None
+    deadline = time.monotonic() + 40.0
+    while streams_closed is not True and time.monotonic() < deadline:
+        try:
+            streams_closed = clients_back_to_zero(
+                client._request("GET", "/api/debug/raw"))
+        except (OSError, ValueError) as error:
+            print("stream client check: %s" % error, file=sys.stderr)
+            break
+        if streams_closed is None:
+            break
+        time.sleep(2.0)
+
     events.sort(key=lambda item: item[1])
     out = open(args.out, "w", newline="")
     writer = csv.writer(out)
@@ -338,6 +370,16 @@ def run(args):
               "web session" % (path, count))
 
     budget_ms = int(LATENCY_BUDGET_S * 1000)
+    stream_failure = streams_closed is False
+    if streams_closed is True:
+        print("stream clients: both closed, device reports none left")
+    elif streams_closed is False:
+        print("STREAM CLIENT LEFT OPEN: the device still counts a stream after "
+              "both were closed, so its task and request were not released",
+              file=sys.stderr)
+    else:
+        print("stream clients: this firmware does not report live stream counts, "
+              "so closure is not verified")
     device = device_latency_pairs(events)
     if device:
         delays = [delay for delay, _label in device]
@@ -351,8 +393,25 @@ def run(args):
               % (len(device), max(delays), sum(delays) / float(len(delays))))
         verdict = 0 if max(delays) <= budget_ms else 1
     else:
-        print("this firmware reports no pushed_ms, so only the indicative "
-              "cross-stream pairing is available")
+        # Two very different reasons for coming back empty, and conflating them
+        # sends the next reader down the wrong path: old firmware that stamps
+        # nothing, versus a window in which the panel simply never changed.
+        stamped = False
+        for _wall, _monotonic, kind, payload in events:
+            if kind != "status":
+                continue
+            try:
+                if "pushed_ms" in json.loads(payload):
+                    stamped = True
+                    break
+            except ValueError:
+                continue
+        if stamped:
+            print("no state change in this window: the firmware stamps its "
+                  "pushes, but nothing changed, so there is no delay to measure")
+        else:
+            print("this firmware reports no pushed_ms, so only the indicative "
+                  "cross-stream pairing is available")
         verdict = None
 
     pairs = pair_latency(events)
@@ -360,7 +419,7 @@ def run(args):
         print("indicative pairing: no raw-then-status pair to measure. Trigger "
               "a real zone on the panel - the panel goes quiet when nothing "
               "changes, so an idle run proves nothing.")
-        return verdict if verdict is not None else 1
+        return max(verdict if verdict is not None else 1, 1 if stream_failure else 0)
     latencies = [latency for latency, _hex, _description in pairs]
     print("Indicative pairing (raw-byte arrival is batched by httpd, so these "
           "are not the pipeline delay):")
@@ -371,8 +430,9 @@ def run(args):
     print("indicative: %d pair(s), max %.3f s, mean %.3f s"
           % (len(pairs), max(latencies), sum(latencies) / len(pairs)))
     if verdict is not None:
-        return verdict
-    return 0 if max(latencies) <= LATENCY_BUDGET_S else 1
+        return max(verdict, 1 if stream_failure else 0)
+    return max(0 if max(latencies) <= LATENCY_BUDGET_S else 1,
+               1 if stream_failure else 0)
 
 
 def self_test():
@@ -422,9 +482,21 @@ def self_test():
     # Firmware without pushed_ms must report no device delays rather than zeros.
     assert device_latency_pairs([event(1.0, "status", json.dumps(
         {"zones": [{"id": 1, "open": True}], "fire": {"alarm": False}}))]) == []
+    # Stream closure: the device counts live streams, and both counts must return
+    # to zero once the client is gone. Firmware that reports neither is recorded as
+    # unverified rather than passing.
+    assert clients_back_to_zero({"status_stream_clients": 0,
+                                 "raw_stream_clients": 0}) is True, "closed"
+    assert clients_back_to_zero({"status_stream_clients": 1,
+                                 "raw_stream_clients": 0}) is False, "left open"
+    assert clients_back_to_zero({"status_stream_clients": 0,
+                                 "raw_stream_clients": 2}) is False, "raw left open"
+    assert clients_back_to_zero({"hex": "0421"}) is None, "older firmware"
+    assert clients_back_to_zero(None) is None, "no snapshot"
     print("latency self-test: PASS (pairs each state change with the newest "
-          "preceding frame, recovering 0.600 s and 1.500 s; and turns the "
-          "device's own stamps into 600 ms and 1500 ms delays)")
+          "preceding frame, recovering 0.600 s and 1.500 s; turns the device's "
+          "own stamps into 600 ms and 1500 ms delays; and notices a stream the "
+          "device left open after its client went away)")
     return 0
 
 

@@ -23,6 +23,7 @@
 #include "mbedtls/platform_util.h"
 
 #include "paradox_event_log.h"
+#include "paradox_json_guard.h"
 #include "paradox_raw_tap.h"
 #include "paradox_state.h"
 #include "paradox1738.h"
@@ -187,6 +188,22 @@ static SemaphoreHandle_t s_config_mutex;
 static volatile bool s_server_running;
 static portMUX_TYPE s_session_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* Live Server-Sent Events sessions. Each one owns an async httpd request and a
+ * task of its own, so a client that disappears without a clean close still has to
+ * leave these back at zero: the next send or heartbeat fails, the task exits, and
+ * the count goes down. They are reported by GET /api/debug/raw so a test can watch
+ * that happen rather than trust it, and a leak would show as a count that climbs
+ * and never comes back. */
+static int s_status_stream_clients;
+static int s_raw_stream_clients;
+
+static void stream_clients_add(int *counter, int delta)
+{
+    portENTER_CRITICAL(&s_session_mux);
+    *counter += delta;
+    portEXIT_CRITICAL(&s_session_mux);
+}
+
 static uint64_t uptime_seconds(void)
 {
     return (uint64_t)esp_timer_get_time() / 1000000ULL;
@@ -286,14 +303,23 @@ static esp_err_t send_error(httpd_req_t *request, const char *status,
     return send_json(request, body);
 }
 
+/* Read and parse a JSON body, replying to the request when the body is unusable.
+ * Returns ESP_OK only when *json is a parsed object the caller now owns. Returns
+ * ESP_FAIL when a 4xx has already been sent and *json is NULL, so the caller must
+ * return without touching it. Returning the reply's own status was a defect: a
+ * successfully sent 400 is ESP_OK, so the callers' `receive_json(...) != ESP_OK`
+ * guard never fired for a rejected body and the handler went on to walk a NULL
+ * cJSON tree, which rebooted the device from a truncated PUT. */
 static esp_err_t receive_json(httpd_req_t *request, cJSON **json)
 {
     if (request->content_len == 0) {
-        return send_error(request, "400 Bad Request", "JSON body required");
+        (void)send_error(request, "400 Bad Request", "JSON body required");
+        return ESP_FAIL;
     }
     if (request->content_len > WEB_REQUEST_BODY_MAX) {
         httpd_resp_set_hdr(request, "Connection", "close");
-        return send_error(request, "413 Payload Too Large", "Request too large");
+        (void)send_error(request, "413 Payload Too Large", "Request too large");
+        return ESP_FAIL;
     }
 
     char content_type[64];
@@ -302,8 +328,9 @@ static esp_err_t receive_json(httpd_req_t *request, cJSON **json)
         strncmp(content_type, "application/json", 16) != 0 ||
         (content_type[16] != '\0' && content_type[16] != ';' &&
          content_type[16] != ' ')) {
-        return send_error(request, "415 Unsupported Media Type",
-                          "Expected application/json");
+        (void)send_error(request, "415 Unsupported Media Type",
+                         "Expected application/json");
+        return ESP_FAIL;
     }
 
     char body[WEB_REQUEST_BODY_MAX + 1u];
@@ -312,13 +339,23 @@ static esp_err_t receive_json(httpd_req_t *request, cJSON **json)
         int result = httpd_req_recv(request, body + received,
                                     request->content_len - received);
         if (result <= 0) {
-            return send_error(request, "400 Bad Request", "Incomplete body");
+            (void)send_error(request, "400 Bad Request", "Incomplete body");
+            return ESP_FAIL;
         }
         received += (size_t)result;
     }
     body[received] = '\0';
     if (memchr(body, '\0', received) != NULL) {
-        return send_error(request, "400 Bad Request", "Invalid JSON object");
+        (void)send_error(request, "400 Bad Request", "Invalid JSON object");
+        return ESP_FAIL;
+    }
+    /* Bound the nesting before the parser sees it. cJSON recurses once per
+     * container level, and the web task stack is 8 KiB, so a body built out of
+     * nothing but open brackets overflowed that stack and rebooted the module.
+     * Every body this API accepts is a flat object, so the limit costs nothing. */
+    if (!paradox_json_depth_ok(body, received, PARADOX_JSON_MAX_DEPTH, NULL)) {
+        (void)send_error(request, "400 Bad Request", "JSON body nests too deeply");
+        return ESP_FAIL;
     }
     const char *parse_end = NULL;
     *json = cJSON_ParseWithLengthOpts(body, received, &parse_end, false);
@@ -337,7 +374,8 @@ static esp_err_t receive_json(httpd_req_t *request, cJSON **json)
     if (*json == NULL || !cJSON_IsObject(*json)) {
         cJSON_Delete(*json);
         *json = NULL;
-        return send_error(request, "400 Bad Request", "Invalid JSON object");
+        (void)send_error(request, "400 Bad Request", "Invalid JSON object");
+        return ESP_FAIL;
     }
     return ESP_OK;
 }
@@ -718,7 +756,10 @@ static bool parse_zone_id(const char *uri, int *zone_id)
 
 static bool json_has_only_zone_fields(const cJSON *json)
 {
-    for (const cJSON *item = json->child; item != NULL; item = item->next) {
+    /* NULL is not "no fields": a caller that was already rejected must not reach
+     * here, but walking a null tree must never be fatal either. */
+    for (const cJSON *item = json == NULL ? NULL : json->child;
+         item != NULL; item = item->next) {
         if (!paradox_config_zone_field_is_known(item->string)) {
             return false;
         }
@@ -1214,6 +1255,10 @@ static esp_err_t debug_raw_handler(httpd_req_t *request)
 
     paradox_raw_tap_stats_t stats;
     paradox_raw_tap_stats(&stats);
+    portENTER_CRITICAL(&s_session_mux);
+    int status_clients = s_status_stream_clients;
+    int raw_clients = s_raw_stream_clients;
+    portEXIT_CRITICAL(&s_session_mux);
     /* The snapshot is the newest `bytes` still in the ring, so a client can poll
      * it without an open stream. */
     size_t count = bytes > stats.bytes_retained ? (size_t)stats.bytes_retained
@@ -1242,6 +1287,9 @@ static esp_err_t debug_raw_handler(httpd_req_t *request)
         cJSON_AddNumberToObject(root, "bytes_retained",
                                 stats.bytes_retained) == NULL ||
         cJSON_AddNumberToObject(root, "first_seq", cursor.seq - count) == NULL ||
+        cJSON_AddNumberToObject(root, "status_stream_clients",
+                                status_clients) == NULL ||
+        cJSON_AddNumberToObject(root, "raw_stream_clients", raw_clients) == NULL ||
         cJSON_AddStringToObject(root, "hex", hex) == NULL) {
         free(hex);
         cJSON_Delete(root);
@@ -1289,6 +1337,7 @@ static void raw_stream_task(void *argument)
     uint8_t bytes[RAW_STREAM_CHUNK];
     char *chunk = malloc(RAW_STREAM_CHUNK * 2u + 96u);
     int64_t last_heartbeat = esp_timer_get_time();
+    stream_clients_add(&s_raw_stream_clients, 1);
     if (chunk != NULL) {
         while (s_server_running &&
                session_is_current(session_token, session_expires)) {
@@ -1335,6 +1384,7 @@ static void raw_stream_task(void *argument)
     }
     free(chunk);
     mbedtls_platform_zeroize(session_token, sizeof(session_token));
+    stream_clients_add(&s_raw_stream_clients, -1);
     (void)httpd_req_async_handler_complete(request);
     vTaskDelete(NULL);
 }
@@ -1405,6 +1455,7 @@ static void status_stream_task(void *argument)
 
     uint64_t last_generation = UINT64_MAX;
     int64_t last_heartbeat = esp_timer_get_time();
+    stream_clients_add(&s_status_stream_clients, 1);
     while (s_server_running &&
            session_is_current(session_token, session_expires)) {
         paradox_state_snapshot_t snapshot;
@@ -1460,6 +1511,7 @@ static void status_stream_task(void *argument)
         vTaskDelay(pdMS_TO_TICKS(200));
     }
     mbedtls_platform_zeroize(session_token, sizeof(session_token));
+    stream_clients_add(&s_status_stream_clients, -1);
     (void)httpd_req_async_handler_complete(request);
     vTaskDelete(NULL);
 }

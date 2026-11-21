@@ -52,10 +52,13 @@ variable if needed; by default it points to the checked-out submodule.
 From the repository root (with the ESP-IDF environment activated):
 
 ```sh
-make check        # host unit tests, boot-log analyzer self-test, both device builds
+make check        # host unit tests, device-tool self-tests, both device builds
 make check-fail   # prove a failing test is reported with file and line
 make smoke        # reset the board and check its boot log (no flashing)
 make smoke FLASH=1  # flash first - overwrites whatever firmware is running
+make soak HOST=<address>      # watch memory, stack and resets over hours
+make latency HOST=<address>   # measure decode-to-push delay on a real panel
+make robust HOST=<address>    # malformed and unauthorized requests against a module
 ```
 
 - `test/host/` — Unity unit tests for pure logic, compiled with the host `gcc`
@@ -68,6 +71,24 @@ make smoke FLASH=1  # flash first - overwrites whatever firmware is running
   circuit, captures the boot log, and fails on a missing `HAP Started` /
   `Returned from app_main()`, a crash marker, or any error-level log line.
   `--self-test` checks the analyzer with no hardware attached.
+- `test/device/soak.sh` (`make soak`) — polls the authenticated API for hours and
+  reports heap, web-task stack, decoder counters and any reset (the device's uptime
+  going backwards). `--self-test` checks the reset detector.
+- `test/device/latency.sh` (`make latency`) — holds both debug streams open, then
+  measures the delay from decoding a panel frame to publishing it using stamps the
+  device puts in its own payloads. Needs real panel traffic; `--self-test` checks
+  the maths.
+- `test/device/robustness.sh` (`make robust`) — replays 51 malformed, unauthorized
+  and cross-origin requests at a running module and fails if any is accepted, if the
+  zone configuration changes by a byte, if a request goes unanswered, or if the
+  module's uptime goes backwards. `--self-test` checks the case list.
+- Request bodies are bounded before the JSON parser sees them: 512 bytes, and at
+  most eight levels of nested containers (`test/host/test_json_guard.c` covers the
+  counting, including brackets that sit inside strings). cJSON recurses once per
+  nesting level and the web server task has an 8 KiB stack, so a body built out of
+  two hundred open brackets overflowed it and rebooted the module. A body that
+  fails to parse now answers 400 and returns, where it used to answer 200 and then
+  dereference the NULL parse result.
 - `make build-sim` builds with `CONFIG_PARADOX_SIMULATOR=y`, which replays
   recorded panel frames instead of reading UART2 so the firmware can be run with
   no alarm panel wired up. Never flash a simulator build and expect it to report
@@ -236,10 +257,17 @@ guess about which stream arrived first:
 ```text
 [status ] open/alarm zones [2], tamper -, fire clear  device delay: zone 2 12 ms
 Device-reported pipeline delay (status pushed_ms - changed block's last_change_ms):
-       12 ms  zone 2   within budget
-      136 ms  zone 2   within budget
-device delay: 9 change(s), max 136 ms, mean 51 ms
+      15 ms  zone 2   within budget
+     172 ms  zone 2   within budget
+device delay: 8 change(s), max 172 ms, mean 91 ms
 ```
+
+Eight zone transitions on the live module measured 15-172 ms, against a budget of
+2000 ms. The same run also checks that closing a stream releases what it held: the
+device counts live Server-Sent Events sessions, and both counts have to come back
+to zero, because each stream owns an httpd request and a task of its own. Streams
+were held for 300 s to confirm the long-lived case - nineteen heartbeats each, no
+drop - before this was written.
 
 The tool also pairs the two streams on the client clock, which is only
 indicative. Each stream is written by its own task and small chunks on the raw

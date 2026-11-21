@@ -14,6 +14,9 @@
 #   make latency      # stamp both SSE streams while you trigger a zone (T6.4);
 #                     # HOST= required, then open and close a protected door
 #   make latency-selftest # latency pairer's maths, no device needed
+#   make robust       # malformed-request battery: 4xx, no partial write, no reboot
+#                     # (T6.3 device half); HOST= required
+#   make robust-selftest # robustness judge's logic, no device needed
 
 APP          := apps/paradox1738
 HOST_TEST_DIR := test/host
@@ -26,9 +29,9 @@ OUT          ?= soak.csv
 # IDF_PATH must be exported for idf.py; point it at the local checkout.
 export IDF_PATH ?= $(HOME)/Source/esp-idf
 
-.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest clean distclean
+.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest clean distclean
 
-check: host-test smoke-selftest soak-selftest latency-selftest build build-sim
+check: host-test smoke-selftest soak-selftest latency-selftest robust-selftest build build-sim
 	@echo "check: PASS"
 
 host-test:
@@ -102,6 +105,18 @@ latency:
 # The pairing maths of the latency tool, runnable with no device attached.
 latency-selftest:
 	@./test/device/latency.sh --self-test
+
+# T6.3 device half: fire every rejected request shape at a running device and
+# insist each one answers 4xx, leaves the stored zone configuration byte-identical
+# and never reboots the module. Run this after any change to request handling:
+#   make robust HOST=192.168.4.30
+robust:
+	@test -n "$(HOST)" || { echo "robust: HOST=<device address> is required"; exit 2; }
+	@./test/device/robustness.sh --host "$(HOST)" $(SOAK_ARGS)
+
+# The judging logic of the robustness battery, runnable with no device attached.
+robust-selftest:
+	@./test/device/robustness.sh --self-test
 
 clean:
 	@$(MAKE) -C $(HOST_TEST_DIR) clean
