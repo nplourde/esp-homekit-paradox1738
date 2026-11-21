@@ -317,7 +317,12 @@ text.
 
 The event history is RAM-only; its capacity is configurable under the Paradox
 1738 menu in `idf.py menuconfig`. Zone changes persist in NVS and require a
-reboot before HomeKit applies changed names, service types, or enabled state.
+reboot before HomeKit applies changed names, service types, or enabled state:
+the accessory database is built when the bridge starts and cannot be rebuilt in
+place. While such a change is pending, `GET /api/zones` reports
+`reboot_required_for_homekit: true` and the Zones tab shows a banner saying so;
+that flag goes back to false only when the bridge restarts, which is the moment
+HomeKit stops being stale.
 The authenticated Debug tab can run a short recorded-frame replay through the
 normal decoder, state, and HomeKit paths. Live UART reads pause during the
 replay, buffered panel traffic is processed afterward, and the previous HomeKit

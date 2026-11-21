@@ -24,7 +24,7 @@ Every milestone lists the work items it contains **and** the tests that must pas
 | M3 | HomeKit hub exposes all accessories | 4 | 7 | [~] |
 | M4 | Custom SoftAP provisioning (dropped; keep stock ESP-IDF BLE) | 0 | 6 | [-] |
 | M5 | Authenticated web server | 2 | 9 | [~] |
-| M6 | Web APIs for config, status, log, debug | 4 | 8 | [ ] |
+| M6 | Web APIs for config, status, log, debug | 4 | 8 | [~] |
 | M7 | Web UI and firmware update | 2 | 7 | [~] |
 | M8 | Integrated release on real hardware | 5 | 7 | [~] |
 
@@ -346,7 +346,10 @@ JSON APIs that read/write zone config, stream live state, expose the event log, 
 | # | Test | Kind | How to run | Pass criteria | Status |
 |---|---|---|---|---|---|
 | T6.1 | GET /api/zones returns all 16 zones with state | device | Fetch the endpoint after login and validate JSON structure, IDs, required fields, and response size. | Exactly 16 entries, indexes 1-16, with string name/type, boolean enabled and live state fields, numeric timestamps, and a response under 8 KB. | [x] |
-| T6.2 | PUT /api/zones/{n} persists and reports pending reboot | device | Temporarily rename zone 16, re-read it, restore the original config, and reboot/re-read to verify NVS persistence. | PUT returns success plus an explicit "reboot required for HomeKit" flag; the change is present immediately in the API and after reboot; HomeKit names/types only change after the reboot. | [~] Persistence across a software restart is observed. Six minutes apart, `GET /api/zones` answered with the same 2275 bytes of zone configuration - the same six enabled zones with the same names (Cuisine, Salon, Porte Avant, Fumee, Porte Sous-Sol, Porte Cote) - `panel_debug_enabled` was still on, and Wi-Fi rejoined the SSID without reprovisioning. mDNS answers what HTTP cannot: after the module came back from the update it still advertised `_hap._tcp` (`Esp-Bridge`, `id=E0:C9:E1:E0:AD:24`) with `sf=0`, which is HomeKit's paired-and-idle flag; an accessory that had lost its pairing advertises the not-paired bit instead. So a firmware update over the web API does not cost the pairing. Remaining for this task: rename zone 16, reboot, and confirm from Apple Home that the accessory name changes only after the reboot. There is no reboot endpoint, so the reboot is either a re-upload of the same image through `POST /api/ota` (about 20 s of accessory downtime) or pulling power, which is also what a true power-cycle test needs. |
+| T6.2 | PUT /api/zones/{n} persists and reports pending reboot | device | Temporarily rename zone 16, re-read it, restore the original config, and reboot/re-read to verify NVS persistence. | PUT returns success plus an explicit "reboot required for HomeKit" flag; the change is present immediately in the API and after reboot; HomeKit names/types only change after the reboot. | [x] Passed on both halves: persistence across a software restart is observed. Six minutes apart, `GET /api/zones` answered with the same 2275 bytes of zone configuration - the same six enabled zones with the same names (Cuisine, Salon, Porte Avant, Fumee, Porte Sous-Sol, Porte Cote) - `panel_debug_enabled` was still on, and Wi-Fi rejoined the SSID without reprovisioning. mDNS answers what HTTP cannot: after the module came back from the update it still advertised `_hap._tcp` (`Esp-Bridge`, `id=E0:C9:E1:E0:AD:24`) with `sf=0`, which is HomeKit's paired-and-idle flag; an accessory that had lost its pairing advertises the not-paired bit instead. So a firmware update over the web API does not cost the pairing. What remained was: rename an enabled zone, reboot, and confirm from Apple Home that the name changes only
+after the reboot. Done now on the bench board with a free serial reset, not an OTA re-upload or a power pull
+- the before/after table is in the notes below. A **power** cycle is still untested; see the `power-cycle`
+work item. |
 | T6.3 | Invalid zone edits are rejected atomically | host-unit | Unit test the request handler with: index 0/17, unknown type, over-long name, truncated JSON body. | Each returns 4xx with an error message and no partial write to NVS (verified by re-reading all fields). | [x] Rules moved to the pure module (`paradox_config_zone_index_from_text()`, `paradox_config_service_name()` / `paradox_config_service_from_name()`, `paradox_config_zone_field_is_known()`) and pinned by host tests: digits 1-16 only, rejecting "", "0", "17", "1x", " 1", "+1", "-1", "01", "007", "1e2" and a 20-digit value that would wrap back into range under `strtol`; exact-lowercase service names, so "Contact" and "smoke " are different strings; unknown field names. Atomicity from `test_zone_update_is_atomic_for_invalid_fields`: a mixed edit with one valid and one invalid field leaves the stored config byte-identical. Device half: `test/device/robustness.sh` (`make robust HOST=<address>`) replays 54 requests at a running module - index 0/17/1x/01/+1/twenty-digits, unknown and wrong-typed fields, unknown field names, empty name, 65-char name, truncated object, truncated string, non-JSON, JSON array, empty body, missing and wrong Content-Type, oversized body, 200 nested brackets, cross-origin write, every read endpoint with no session, writes after logout, and four origins that only look like the device. All 54 answered the expected status, the zone configuration came back byte-identical (2275 bytes before and after), and uptime never went backwards, so nothing rebooted. The origin rule that guards every write moved to `paradox_same_origin.c`, and `test/host/test_same_origin.c` pins it: a page whose host merely starts with the device address, an origin naming another port, an origin with no scheme, and a host cut one byte short are each refused, while the dashboard's own requests pass - including the explicit `:80` a browser sends when the port is typed, and the `Referer` form carrying a path. The live module answers those same strings with the same 403 and 200, and a rejected origin never reaches the password check, so probing the guard cannot spend the five-login lockout. |
 | T6.4 | Live status stream pushes changes within 2 s | device | Open the SSE stream from a laptop, inject a zone-open frame, measure the delay to the pushed event. | Event arrives within 2 s of injection; stream stays open for at least 5 minutes without reconnect; disconnecting the client does not leak a session (client count returns to 0). | [x] Measured on the live panel with `test/device/latency.sh` (`make latency`, `make latency-selftest`). The delay comes from the device's own stamps - status payloads carry `pushed_ms` (when the JSON was produced) beside each zone's and the fire block's `last_change_ms` (when the decode applied the frame) - so it needs no client clock and no ordering assumption between two streams. A 1200 s capture cycling zone 2 nine times gave 8 transitions at **15-172 ms** (mean 91 ms); a 420 s capture gave 3 at **12-15 ms**; budget is 2000 ms. The earlier cross-stream pairing is kept only under a heading saying it is indicative: that 1200 s capture showed the raw byte stream surfacing 2.87 s *after* the push that already reported the same frame, because small chunks sit in the httpd output buffer, so the 4.62 s outlier measured the debug stream rather than the bridge. Measuring this found a real delay: `paradox1738.c` asked `uart_read_bytes()` for a full 32-byte buffer with a 1 s timeout, and that call returns early only once it holds the requested count, so a 4-byte frame from a quiet panel waited up to a second in the UART driver; it now asks how much is buffered. Stability: both streams held 300 s with 19 keepalives each and no drop, and an earlier 150 s window served 25 pushes while a second stream and 495 REST requests were in flight. Closure: `GET /api/debug/raw` now reports `status_stream_clients` and `raw_stream_clients`, and after the tool closes both streams the device reports both back at zero - each stream owns an async httpd request and a task, so a count that stayed up would be a leak. An idle run exits non-zero on purpose: the panel is silent when nothing changes, so a run with no trigger proves nothing. |
 | T6.5 | Status endpoint matches HomeKit state | device | Compare GET /api/status against the HAP /accessories values for the same zones after the same injected frames. | No disagreement on any zone: open/closed, alarm, tamper and fire all match between the web view and HomeKit. | [ ] |
@@ -386,9 +389,8 @@ zero framing errors; `test/host/test_framing.c:test_idle_panel_broadcast_decodes
 replays the captured group as a regression test. After the fix the device ran
 596 frames with `framing_errors 0`, `bytes_discarded 0` and `overruns 0`.
 
-T6.1, T6.3, T6.4, T6.6, T6.7 and T6.8 passed. T6.2 (reboot persistence) and T6.5
-(status against HomeKit) remain open; T6.5 additionally waits on the unpaired HAP
-endpoint, which does not expose accessory state for comparison.
+T6.1, T6.2, T6.3, T6.4, T6.6, T6.7 and T6.8 passed. Only T6.5 (status against HomeKit) remains open: it
+waits on the unpaired HAP endpoint, which does not expose accessory state for comparison.
 
 Two crashes came out of running the T6.3 battery against a live module, and both
 are fixed and pinned by tests:
@@ -404,6 +406,68 @@ are fixed and pinned by tests:
   before the parser sees it, and `test/host/test_json_guard.c` covers the counting
   - including brackets that sit inside strings, and an escaped backslash that
   changes which quote ends one.
+- **The same-origin (CSRF) guard, tested on the live module.** Three device cases sit beside the host tests:
+  `PUT /api/zones/16` whose `Origin` is `http://192.168.4.30.evil.example`, one naming another port, and one
+  with no scheme at all - each answered 403, each with the zone configuration byte-identical afterwards. A
+  rejected `Origin` never reaches the password check, so probing the guard cannot spend the five-login
+  lockout. The host tests are the half that pins the sharp edge: the character after the host must be `/`,
+  `?`, `#` or end-of-string, so `http://192.168.4.30evil` is refused while `http://192.168.4.30:80` is
+  accepted when the `Host` header also spells the port. A page at a host that *renders* as the device's
+  address in an address bar is not the device.
+- **T6.3's device half.** 54 battery cases against the live module, every one answered with the intended
+  4xx: index 0 and 17, the URI path forms, unknown zone fields, non-boolean `enabled`, wrong JSON types,
+  a 4 MiB name, a 512 KiB body (413), an empty body, an unterminated object, deep nesting (now a 400, not a
+  reboot), unauthenticated GETs and a logged-out `PUT` (401). `GET /api/zones` read before and after the run
+  is byte-identical, which is the atomicity claim: a rejected request changes nothing. The battery is
+  `test/device/robustness.sh` (`make robust`) and its self-test asserts the case count (54) and the size of
+  the anonymous subset (14), so a case added without being checked fails `make check`.
+- **T6.4's second half, and a correction to its first.** `pushed_ms` - the generation stamp taken when the
+  status snapshot is built - and `last_change_ms` - when the panel event arrived - are both device-clock
+  stamps on one object, so `pushed_ms - last_change_ms` times the pipeline with no client clock and no
+  cross-stream assumption: eight triggers on zone 2 gave **15-172 ms, mean 91 ms** against the 2 s budget.
+  The 300 s stream run with no panel activity kept two EventSources open, each answering 20 requests with 19
+  keepalives and no gaps, and `status_stream_clients` / `raw_stream_clients` (counters added so release is
+  observable at all) counted the client in and then back to zero after close - a leaked SSE session is
+  otherwise invisible until a heartbeat fails. The correction: pairing raw frames to status pushes across two
+  streams measures httpd's chunk batching, not the bridge, which is why `test/device/latency.sh` says "no
+  state change in this window" on a quiet panel instead of reporting a five-hundred-second latency.
+- **Tooling rules that each cost time once, recorded so they are not paid again.** The device holds a single
+  web session, so every device tool re-logs in on HTTP 401 and a tool of the user's takes over the slot.
+  `Origin` must not carry an explicit default port, or it stops matching `Host` and the write is refused.
+  An idle SSE stream must be read with `select()`, not a socket timeout, because an idle stream is normal and
+  a timed-out readline leaves the reader in an indeterminate state. Five failed logins trigger a 60-second
+  lockout, so one wrong password poisons the window. And do not rewrite a C file from read-tool output: the
+  read is truncated at 50 KiB, so the rewrite silently truncates the file - `make check` caught it as a
+  syntax error in `web_server.c`, whose real length is about 2055 lines.
+- **T6.2 is closed on both halves, and closing it found a wrong answer in the API.** The test ran on the bench
+  board (192.168.4.62 - 16 bridged zone accessories plus the fire tile, so renaming one changes the HomeKit
+  accessory database and is visible in the Apple Home app), flashed with `app-flash` so NVS and pairing were
+  never touched, and reset over the CP2102's RTS line by `smoke.sh`: free, no panel, no BOOT button, nothing
+  to authorize. The rename was read from both sides.
+
+  | | before the reset | after the reset |
+  |---|---|---|
+  | `GET /api/zones`, zone 8 | `T62-after-reboot` | `T62-after-reboot` - survived NVS |
+  | Apple Home tile (the user's eyes) | **Zone 8** | **T62-after-reboot** |
+  | `reboot_required_for_homekit` | `true` | `false` - bridge rebuilt from configuration |
+  | mDNS HomeKit configuration number `s#` | 5 | 6 - the accessory database changed |
+  | pairing status `sf` | 0 (paired) | 0 (paired), and the controller re-verified |
+
+  So a zone edit is live in the API at once, stale in HomeKit until the bridge restarts, and the restart is
+  what publishes it - the claim the `PUT` response had always made, now watched from the Home side. The boot
+  log carries the pairing proof directly, which is what the OTA path leans on: `HomeKit bridge registered:
+  16 enabled zones, fire accessory`, then seconds later `Pair Verify M2 Successful` and `HomeKit Session
+  active` for the iPhone's controller identity, inside `smoke: PASS (217 log lines, no crash markers, no
+  error-level lines)`. State was restored afterwards: zone 8 is `Zone 8` again, flag `false`, `s#` back to 8.
+- **The bug that run exposed:** `GET /api/zones` contradicted the `PUT` that had just answered. Its flag was
+  the literal `false`, so seconds after the device had said "reboot required" the same device told the
+  dashboard that nothing was pending. There is one flag now - false at boot, because the bridge has just been
+  built from this configuration; true after any successful zone write; and only a restart returns it to false,
+  which is exactly when the bridge stops being stale. It lives in RAM, so there is no stored state to fall out
+  of step and a factory reset clears it by rebooting. Writing back identical values still reports HomeKit as
+  stale, because deciding otherwise would mean keeping the snapshot the bridge was built from. The Zones tab
+  shows a banner while the flag is true, and it appears without a reload when a zone is saved. Verified false
+  at boot, true from both the `PUT` and the `GET` after an edit, false again after the reset.
 
 ---
 
@@ -493,6 +557,12 @@ The whole stack flashed to the board, verified in Apple Home with physical zone 
   not a 35 s beacon; and a quiet stretch with error-free counters is an idle house. The link test is a
   deliberate trigger - `test/device/latency.sh` (`make latency`) times a physical zone change from raw
   bytes to status push, and README states the reading rule so a 24 h soak is not misjudged. [x]
+  *Depends on:* `build-flash-test`
+- [ ] `power-cycle` — Pulling the plug, then plugging it back in
+  A reset (RTS, a BOOT tap, or the reboot that follows an update) is not the same as losing power. Power the
+  module off at the wall, wait, power it back: zone configuration, HomeKit pairing and Wi-Fi credentials must
+  all come back with no re-provisioning and no re-pairing, and Home must show the bridge again without the
+  panel or the bridge being touched. The 24 h soak needs the bench anyway, so bundle this with the handover.
   *Depends on:* `build-flash-test`
 - [x] `github-push` — Committing and pushing the work
   Commit each completed phase to main and push to https://github.com/nplourde/esp-homekit-
