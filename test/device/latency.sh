@@ -8,11 +8,21 @@ client's wall clock:
   * /api/status/stream     - the zone/fire state the bridge publishes
 
 A physical trigger on the alarm panel therefore shows up twice: first as raw
-bytes arriving, then as a status push. The gap between the two is the bridge's
-own pipeline latency (UART read -> decode -> state model -> SSE write), which is
-what T6.4 asks to keep under two seconds. The time between the panel actually
-changing and the bytes arriving is panel-side and cannot be measured from this
-side of the wire, so the script reports what it can attribute and says so.
+bytes arriving, then as a status push. The gap between the two is indicative
+only: each stream is written by its own task, and small chunks on the raw stream
+sit in the httpd output buffer until enough accumulate, so a raw event can
+surface seconds after the byte actually arrived off the wire.
+
+The authoritative number is reported by the device itself. Every status payload
+carries pushed_ms (when the JSON was produced) and every zone / fire block
+carries last_change_ms (when the decode applied the frame that changed it), both
+on the device clock, so pushed_ms minus last_change_ms is the bridge pipeline
+delay - UART read, decode, state model, SSE write - with no client clock and no
+assumption about which stream arrived first. A firmware without pushed_ms falls
+back to the indicative pairing and says so.
+
+The time between the panel actually changing and the bytes arriving is panel-side
+and cannot be measured from this side of the wire.
 
 Note on sessions: the device holds exactly one web session, so a second client
 signing in (another browser tab, a soak run) invalidates this one. The streams
@@ -157,6 +167,57 @@ def pair_latency(events):
     return pairs
 
 
+def state_blocks(status):
+    """id -> (open, alarm, tampered, bypassed, last_change_ms), plus a fire key."""
+    blocks = {}
+    for zone in status.get("zones", []):
+        blocks[zone.get("id")] = (bool(zone.get("open")), bool(zone.get("alarm")),
+                                  bool(zone.get("tampered")),
+                                  bool(zone.get("bypassed")),
+                                  int(zone.get("last_change_ms", 0)))
+    fire = status.get("fire", {})
+    blocks["fire"] = (bool(fire.get("alarm")), bool(fire.get("restored")),
+                      bool(fire.get("fault")), 0,
+                      int(fire.get("last_change_ms", 0)))
+    return blocks
+
+
+def change_deltas(previous, current):
+    """(delay_ms, label) for every zone or fire block this push changed.
+
+    delay_ms is the payload's pushed_ms minus the block's last_change_ms: how
+    long the bridge held the change before publishing it. Empty when the
+    firmware predates pushed_ms, so callers can tell "no field" from "no change".
+    """
+    pushed = current.get("pushed_ms")
+    if pushed is None:
+        return []
+    out = []
+    old = state_blocks(previous)
+    for key, block in state_blocks(current).items():
+        if key in old and old[key][:4] != block[:4]:
+            label = "fire" if key == "fire" else "zone %s" % key
+            out.append((int(pushed) - block[4], label))
+    return out
+
+
+def device_latency_pairs(events):
+    """Every device-reported change delay in the capture, oldest first."""
+    out = []
+    previous = None
+    for _wall, _monotonic, kind, payload in events:
+        if kind != "status":
+            continue
+        try:
+            status = json.loads(payload)
+        except ValueError:
+            continue
+        if previous is not None:
+            out.extend(change_deltas(previous, status))
+        previous = status
+    return out
+
+
 def run(args):
     client = Client(args.host, args.port)
     password = args.password or os.environ.get("PARADOX_WEB_PASSWORD")
@@ -179,6 +240,7 @@ def run(args):
     lock = threading.Lock()
     reopened = {}
     last_signature = [None]
+    last_status = [None]
 
     def pump(path, kind):
         failures = 0
@@ -205,7 +267,8 @@ def run(args):
                         sys.stdout.flush()
                     else:
                         try:
-                            signature = zone_signature(json.loads(payload))
+                            parsed = json.loads(payload)
+                            signature = zone_signature(parsed)
                         except ValueError:
                             continue
                         with lock:
@@ -213,11 +276,20 @@ def run(args):
                             if changed:
                                 last_signature[0] = signature
                         if changed:
+                            extra = ""
+                            if last_status[0] is not None:
+                                deltas = change_deltas(last_status[0], parsed)
+                                if deltas:
+                                    extra = "  device delay: " + ", ".join(
+                                        "%s %d ms" % (label, delay)
+                                        for delay, label in deltas)
+                            last_status[0] = parsed
                             print("[status ] open/alarm zones %s, tamper %s, "
-                                  "fire %s"
+                                  "fire %s%s"
                                   % (list(signature[0]) or "-",
                                      list(signature[1]) or "-",
-                                     "ALARM" if signature[2] else "clear"))
+                                     "ALARM" if signature[2] else "clear",
+                                     extra))
                             sys.stdout.flush()
                 if stop.is_set():
                     break
@@ -265,19 +337,41 @@ def run(args):
         print("%s was reopened %d time(s): another client took the single "
               "web session" % (path, count))
 
+    budget_ms = int(LATENCY_BUDGET_S * 1000)
+    device = device_latency_pairs(events)
+    if device:
+        delays = [delay for delay, _label in device]
+        print("Device-reported pipeline delay "
+              "(status pushed_ms - changed block's last_change_ms):")
+        for delay_ms, label in device:
+            print("  %7d ms  %-8s %s" % (delay_ms, label,
+                                         "within budget" if delay_ms <= budget_ms
+                                         else "OVER BUDGET"))
+        print("device delay: %d change(s), max %d ms, mean %.1f ms"
+              % (len(device), max(delays), sum(delays) / float(len(delays))))
+        verdict = 0 if max(delays) <= budget_ms else 1
+    else:
+        print("this firmware reports no pushed_ms, so only the indicative "
+              "cross-stream pairing is available")
+        verdict = None
+
     pairs = pair_latency(events)
     if not pairs:
-        print("latency: no raw-then-status pair to measure. Trigger a real "
-              "zone on the panel - the panel goes quiet when nothing changes, "
-              "so an idle run proves nothing.")
-        return 1
+        print("indicative pairing: no raw-then-status pair to measure. Trigger "
+              "a real zone on the panel - the panel goes quiet when nothing "
+              "changes, so an idle run proves nothing.")
+        return verdict if verdict is not None else 1
     latencies = [latency for latency, _hex, _description in pairs]
+    print("Indicative pairing (raw-byte arrival is batched by httpd, so these "
+          "are not the pipeline delay):")
     for latency, hex_text, description in pairs:
-        verdict = "within" if latency <= LATENCY_BUDGET_S else "OVER"
+        verdict_text = "within" if latency <= LATENCY_BUDGET_S else "OVER"
         print("  %6.3f s (%s %.1f s budget)  bytes %s -> %s"
-              % (latency, verdict, LATENCY_BUDGET_S, hex_text, description))
-    print("latency: %d pair(s), max %.3f s, mean %.3f s"
+              % (latency, verdict_text, LATENCY_BUDGET_S, hex_text, description))
+    print("indicative: %d pair(s), max %.3f s, mean %.3f s"
           % (len(pairs), max(latencies), sum(latencies) / len(pairs)))
+    if verdict is not None:
+        return verdict
     return 0 if max(latencies) <= LATENCY_BUDGET_S else 1
 
 
@@ -287,16 +381,27 @@ def self_test():
         return ("t%.1f" % seconds, seconds, kind, payload)
 
     events = [
-        event(0.0, "status", json.dumps({"zones": [{"id": 1, "open": False}],
-                                         "fire": {"alarm": False}})),
+        event(0.0, "status", json.dumps({"zones": [{"id": 1, "open": False,
+                                                    "last_change_ms": 0}],
+                                         "fire": {"alarm": False,
+                                                  "last_change_ms": 0}})),
         event(1.0, "raw", '{"seq":1,"dropped":0,"hex":"04119a30"}'),
-        event(1.6, "status", json.dumps({"zones": [{"id": 1, "open": True}],
-                                         "fire": {"alarm": False}})),
+        event(1.6, "status", json.dumps({"pushed_ms": 1600,
+                                         "zones": [{"id": 1, "open": True,
+                                                    "last_change_ms": 1000}],
+                                         "fire": {"alarm": False,
+                                                  "last_change_ms": 0}})),
         event(2.0, "raw", '{"seq":5,"dropped":0,"hex":"00119a30"}'),
-        event(2.4, "status", json.dumps({"zones": [{"id": 1, "open": True}],
-                                         "fire": {"alarm": False}})),
-        event(3.5, "status", json.dumps({"zones": [{"id": 1, "open": False}],
-                                         "fire": {"alarm": False}})),
+        event(2.4, "status", json.dumps({"pushed_ms": 2400,
+                                         "zones": [{"id": 1, "open": True,
+                                                    "last_change_ms": 1000}],
+                                         "fire": {"alarm": False,
+                                                  "last_change_ms": 0}})),
+        event(3.5, "status", json.dumps({"pushed_ms": 10500,
+                                         "zones": [{"id": 1, "open": False,
+                                                    "last_change_ms": 9000}],
+                                         "fire": {"alarm": False,
+                                                  "last_change_ms": 0}})),
     ]
     pairs = pair_latency(events)
     assert len(pairs) == 2, "expected two state changes, got %d" % len(pairs)
@@ -307,8 +412,19 @@ def self_test():
     assert pair_latency([]) == [], "no events must yield no pairs"
     assert len(pair_latency([e for e in events if e[2] == "status"])) == 0, \
         "status pushes with no preceding bytes must be skipped"
+    # The device stamps are independent of the client clock: the first change was
+    # applied at 1000 ms and published at 1600 ms (600 ms), the second at 9000 ms
+    # and published at 10500 ms (1500 ms). The identical-status push in between
+    # must contribute nothing.
+    device = device_latency_pairs(events)
+    assert [(delay, label) for delay, label in device] == [(600, "zone 1"),
+                                                           (1500, "zone 1")], device
+    # Firmware without pushed_ms must report no device delays rather than zeros.
+    assert device_latency_pairs([event(1.0, "status", json.dumps(
+        {"zones": [{"id": 1, "open": True}], "fire": {"alarm": False}}))]) == []
     print("latency self-test: PASS (pairs each state change with the newest "
-          "preceding frame; recovered 0.600 s and 1.500 s)")
+          "preceding frame, recovering 0.600 s and 1.500 s; and turns the "
+          "device's own stamps into 600 ms and 1500 ms delays)")
     return 0
 
 

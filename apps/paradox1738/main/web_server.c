@@ -571,7 +571,13 @@ static cJSON *state_snapshot_json(const paradox_state_snapshot_t *snapshot)
         return NULL;
     }
     if (cJSON_AddNumberToObject(root, "generation",
-                                (double)snapshot->generation) == NULL) {
+                                (double)snapshot->generation) == NULL ||
+        /* When this JSON was produced, on the device clock. A client measuring
+         * the panel-to-HomeKit path cannot line its own clock up with the
+         * device's, but pushed_ms minus a zone's last_change_ms is a difference
+         * of two device stamps, so it needs no clock synchronisation. */
+        cJSON_AddNumberToObject(root, "pushed_ms",
+                                (double)(esp_timer_get_time() / 1000)) == NULL) {
         cJSON_Delete(root);
         cJSON_Delete(zones);
         cJSON_Delete(fire);

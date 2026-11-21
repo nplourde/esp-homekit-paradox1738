@@ -251,9 +251,21 @@ bool paradox1738_event_read(paradox1738_event_t *out_event)
             return true;
         }
 
-        /* uart_read_bytes returns how much it actually gave us; a short read is
-         * normal at 9600 baud and must not be treated as a full frame. */
-        int len = uart_read_bytes(uart_num, chunk, sizeof(chunk),
+        /* The panel sends a couple of frames and then stays quiet for seconds.
+         * uart_read_bytes returns early only once it holds the requested count,
+         * so asking for a whole buffer parks a 4-byte frame inside the driver
+         * for the full timeout - up to a second of dead time between the panel
+         * changing and the bridge noticing it. Take what the driver already
+         * holds, or wait for the first byte when nothing is buffered. A short
+         * read is still normal at 9600 baud, and the decoder is a byte stream,
+         * so a frame split across two reads is fine. */
+        size_t buffered = 0;
+        (void)uart_get_buffered_data_len(uart_num, &buffered);
+        size_t want = buffered != 0 ? buffered : 1u;
+        if (want > sizeof(chunk)) {
+            want = sizeof(chunk);
+        }
+        int len = uart_read_bytes(uart_num, chunk, want,
                                   READ_TIMEOUT_MS / portTICK_PERIOD_MS);
         if (len <= 0) {
             continue;

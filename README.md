@@ -171,7 +171,7 @@ change, and logout are under `/api/auth/`. Authenticated API endpoints:
 |---|---|
 | `GET /api/zones` | All configured zones plus live state |
 | `PUT /api/zones/{1..16}` | Update a zone's `name`, `type` (`contact`, `motion`, `smoke`, `leak`), and/or `enabled`; response reports `reboot_required_for_homekit` |
-| `GET /api/status` | Current zone and fire state snapshot |
+| `GET /api/status` | Current zone and fire state snapshot, plus `pushed_ms`: the device time the snapshot was produced |
 | `GET /api/status/stream` | Server-sent status updates |
 | `GET /api/events?class=zone&zone=1&limit=32` | Recent decoded events, newest first; class, zone, and limit filters are optional |
 | `POST /api/events/clear` | Clear the in-memory event history |
@@ -223,27 +223,50 @@ signed in last owns the session, so do not run two API clients against one devic
 and expect both to keep working.
 
 `make latency HOST=<device address> SOAK_ARGS="--duration 300"` runs
-`test/device/latency.sh`, which opens the panel-bytes stream
-(`/api/debug/raw/stream`) and the status stream (`/api/status/stream`) together
-and stamps every event with one clock. Start it, **then open and close a
-protected door**: the trigger arrives as raw bytes first and leaves as a status
-push, and the script pairs each content-changing push with the newest frame
-before it, printing the gap and a verdict against the two-second budget:
+`test/device/latency.sh`. Start it, **then open and close a protected door**; the
+tool reports the bridge's own delay in two ways.
+
+The authoritative one comes from the device. Every status payload carries
+`pushed_ms` (when the JSON was produced) and every zone and fire block carries
+`last_change_ms` (when the decode applied the frame that changed it). Both are
+the device clock, so `pushed_ms - last_change_ms` is the pipeline delay - UART
+read, decode, state model, SSE write - with no client clock involved and no
+guess about which stream arrived first:
 
 ```text
-  0.300 s (within 2.0 s budget)  bytes 04119a30 -> open/alarm zones: 1, tamper: none, fire: clear
-latency: 2 pair(s), max 0.420 s, mean 0.310 s
+[status ] open/alarm zones [2], tamper -, fire clear  device delay: zone 2 12 ms
+Device-reported pipeline delay (status pushed_ms - changed block's last_change_ms):
+       12 ms  zone 2   within budget
+      136 ms  zone 2   within budget
+device delay: 9 change(s), max 136 ms, mean 51 ms
 ```
 
-That gap is the bridge's own pipeline - UART read, decode, state model, SSE write.
-It deliberately excludes the time between the door moving and the panel putting
-bytes on the wire, which is panel-side and cannot be measured from this side.
-Pushes are only counted when their content changes, so keepalives and repeats
-create no pairs; a run where nothing changed exits non-zero, because an idle
-panel is not a passing measurement. Streams reopen automatically when they drop
-or when another client steals the session, and the run says how often that
-happened. `make latency-selftest` checks the pairing maths against synthetic
-streams - a 0.600 s pair, a 1.500 s pair, and the cases that must produce none.
+The tool also pairs the two streams on the client clock, which is only
+indicative. Each stream is written by its own task and small chunks on the raw
+stream sit in the httpd output buffer until enough accumulate, so a raw event can
+surface seconds after the byte arrived; in a live capture that made the byte
+stream trail the state pushes by two to three seconds, which is invisible in the
+Debug tab (it only ever shows the bytes in order) but makes the paired gap
+worthless as a latency figure. It is printed under an explicit heading so it
+cannot be mistaken for the measurement, and firmware that predates `pushed_ms`
+falls back to it.
+
+Pushes count only when their content changes, so keepalives and repeats create no
+pairs; a run where nothing changed exits non-zero, because an idle panel is not a
+passing measurement. Streams reopen automatically when they drop or when another
+client steals the session, and the run says how often that happened.
+`make latency-selftest` checks the maths against synthetic streams - a 0.600 s
+paired gap and 600 ms / 1500 ms device delays, plus the cases that must produce
+nothing.
+
+One firmware change came out of measuring this. `paradox1738.c` used to call
+`uart_read_bytes()` asking for a whole 32-byte buffer with a one second timeout,
+and that call returns early only once it holds the requested count: a four-byte
+frame from a quiet panel therefore sat in the UART driver for up to a full second
+before the decoder saw it. The loop now asks the driver how much it already has
+and reads that, waiting for a single byte when nothing is buffered, so a frame is
+processed as it arrives. A frame split across two reads is still fine, because
+the decoder is a byte-stream state machine and host tests cover short reads.
 
 The Debug tab can also mirror the panel UART byte-for-byte over Wi-Fi. The raw
 tap records every byte the UART task reads, including the bytes the decoder
