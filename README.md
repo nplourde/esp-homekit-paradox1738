@@ -206,6 +206,45 @@ taken from `PARADOX_WEB_PASSWORD`) rather than passed as an argument, so it does
 not land in shell history or `ps`. `make soak-selftest` checks the reboot
 detector with no device attached.
 
+Two things make those counters readable correctly. **The panel broadcasts on
+activity, not on a fixed cadence.** A quiet house means no bytes: a wired module
+sat 354 s with `bytes_recorded: 0` while nothing happened, then produced 48 bytes
+and 12 clean frames the moment two doors were opened and closed, with
+`framing_errors: 0` and `bytes_lost: 0` throughout. So "no traffic for ten
+minutes" is not a fault, and a long soak will show flat counters unless the
+household is active - prove the link with a deliberate trigger instead (next
+paragraph), and read flat-but-error-free as idle rather than broken.
+**The device keeps exactly one web session:** `s_session_token` is a single slot,
+and every login replaces it. A second browser tab, a second machine, or a soak
+run signing in invalidates the first client's cookie, which gets `401` on its next
+request - this is also why a session that seemed fine died after nine minutes
+when another client logged in. The scripts here re-login on `401`, but whoever
+signed in last owns the session, so do not run two API clients against one device
+and expect both to keep working.
+
+`make latency HOST=<device address> SOAK_ARGS="--duration 300"` runs
+`test/device/latency.sh`, which opens the panel-bytes stream
+(`/api/debug/raw/stream`) and the status stream (`/api/status/stream`) together
+and stamps every event with one clock. Start it, **then open and close a
+protected door**: the trigger arrives as raw bytes first and leaves as a status
+push, and the script pairs each content-changing push with the newest frame
+before it, printing the gap and a verdict against the two-second budget:
+
+```text
+  0.300 s (within 2.0 s budget)  bytes 04119a30 -> open/alarm zones: 1, tamper: none, fire: clear
+latency: 2 pair(s), max 0.420 s, mean 0.310 s
+```
+
+That gap is the bridge's own pipeline - UART read, decode, state model, SSE write.
+It deliberately excludes the time between the door moving and the panel putting
+bytes on the wire, which is panel-side and cannot be measured from this side.
+Pushes are only counted when their content changes, so keepalives and repeats
+create no pairs; a run where nothing changed exits non-zero, because an idle
+panel is not a passing measurement. Streams reopen automatically when they drop
+or when another client steals the session, and the run says how often that
+happened. `make latency-selftest` checks the pairing maths against synthetic
+streams - a 0.600 s pair, a 1.500 s pair, and the cases that must produce none.
+
 The Debug tab can also mirror the panel UART byte-for-byte over Wi-Fi. The raw
 tap records every byte the UART task reads, including the bytes the decoder
 discards while it resynchronises framing, so a framing or phase problem can be

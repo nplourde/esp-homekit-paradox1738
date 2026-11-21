@@ -26,3 +26,4 @@ test/host/build/
 # Soak logger output (T8.4)
 soak.csv
 soak-*.csv
+latency.csv

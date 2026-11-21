@@ -11,6 +11,9 @@
 #   make smoke        # reset + boot-log smoke test (T0.3); FLASH=1 to flash first
 #   make soak         # 24 h soak logger over the web API (T8.4); HOST= required
 #   make soak-selftest # soak logger's reboot detector, no device needed
+#   make latency      # stamp both SSE streams while you trigger a zone (T6.4);
+#                     # HOST= required, then open and close a protected door
+#   make latency-selftest # latency pairer's maths, no device needed
 
 APP          := apps/paradox1738
 HOST_TEST_DIR := test/host
@@ -23,9 +26,9 @@ OUT          ?= soak.csv
 # IDF_PATH must be exported for idf.py; point it at the local checkout.
 export IDF_PATH ?= $(HOME)/Source/esp-idf
 
-.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest clean distclean
+.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest clean distclean
 
-check: host-test smoke-selftest soak-selftest build build-sim
+check: host-test smoke-selftest soak-selftest latency-selftest build build-sim
 	@echo "check: PASS"
 
 host-test:
@@ -86,6 +89,19 @@ soak:
 # The reboot detector of the soak logger, runnable with no device attached.
 soak-selftest:
 	@./test/device/soak.sh --self-test
+
+# T6.4: stamp /api/debug/raw/stream (panel bytes as the device reads them) and
+# /api/status/stream (what the bridge publishes) with one clock, then report the
+# gap for each state change. Start it, then open and close a protected door: the
+# panel goes quiet when nothing changes, so an idle run measures nothing.
+#   make latency HOST=192.168.4.30 SOAK_ARGS="--duration 300"
+latency:
+	@test -n "$(HOST)" || { echo "latency: HOST=<device address> is required"; exit 2; }
+	@./test/device/latency.sh --host "$(HOST)" $(SOAK_ARGS)
+
+# The pairing maths of the latency tool, runnable with no device attached.
+latency-selftest:
+	@./test/device/latency.sh --self-test
 
 clean:
 	@$(MAKE) -C $(HOST_TEST_DIR) clean
