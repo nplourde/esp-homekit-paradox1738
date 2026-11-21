@@ -431,7 +431,10 @@ The whole stack flashed to the board, verified in Apple Home with physical zone 
   84:cc:a8:69:b4:4c). The chip is paired in HomeKit and provisioned to SSID APO; preserve NVS and
   pairing unless the user explicitly approves a reset. [x] M8 production/simulator builds pass;
   final image flashed without erasing NVS, and the five-minute post-flash smoke registered the
-  bridge, 16 zones, and Fire.
+  bridge, 16 zones, and Fire. Both boards now run `4e001de`: the bench board by `app-flash` (75 s smoke
+  PASS, 256 lines, HomeKit Pair Verify still succeeding on the preserved pairing, hub_stack_min_free
+  5148) and the live module by `POST /api/ota` in 20.1 s, which reported `4e001de` from `ota_0` and left
+  `fb403b2` in `ota_1` as the rollback slot.
   *Depends on:* `hk-event-loop`, `sdkconfig-cleanup`, `web-ui`
 - [~] `docs-wiring` — Documenting wiring, protocol and usage
   Update README with the stock ESP-IDF BLE provisioning flow, web UI URL/port map, zone config, OTA, and the
@@ -449,9 +452,12 @@ The whole stack flashed to the board, verified in Apple Home with physical zone 
   sample precisely so a 24 h run separates panel-side burstiness from a reader or link dropout; the 24 h
   run has not been done yet. [~]
   *Depends on:* `build-flash-test`
-- [ ] `github-push` — Committing and pushing the work
+- [x] `github-push` — Committing and pushing the work
   Commit each completed phase to main and push to https://github.com/nplourde/esp-homekit-
-  paradox1738.git with the Co-authored-by trailer.
+  paradox1738.git with the Co-authored-by trailer. Done: remote `main` moved `635115a` -> `4e001de`
+  with the trailer on every commit, and annotated tag `v0.1.0` published. The push was requested while
+  `docs-wiring` and `homekit-verify` were still open, so the tag annotation lists what is verified and
+  what remains rather than claiming a finished release.
   *Depends on:* `docs-wiring`
 - [~] `homekit-verify` — Verifying the bridge in Apple Home
   Pair the bridge, confirm the hub plus 16 zone accessories plus the fire accessory appear with
@@ -478,7 +484,7 @@ The whole stack flashed to the board, verified in Apple Home with physical zone 
 | T8.4 | 24-hour soak with the panel attached | device | Keep the panel wired and the web UI reachable, then run `make soak HOST=<device address>` (or `test/device/soak.sh --host <address> --interval 60 --duration 86400 --out soak.csv`) for 24 h and inspect the CSV: heap low-water, web stack watermark, decoder counters and raw UART byte arrival, one row per minute. | No reset, no crash, no heap decline beyond 5 KB over the run, framing error count stable (no permanent desync), HomeKit stays reachable. | [ ] Not run as a formal 24 h soak. Supporting observations: the live panel module had been up 3.5 days on the pre-fix build with `frames_ok 9057`, `framing_errors 0`, `bytes_discarded 0`, `overruns 0` - no permanent desync - and the new build exposes `free_heap_bytes` (174688), `min_free_heap_bytes` (154756, 145660 under API load), `largest_heap_block_bytes` (118784) and `web_stack_free_bytes` over the API, so the soak can now be logged by polling `GET /api/system` with no serial lead attached. |
 | T8.5 | Recovery paths verified | manual | Force each failure: incorrect Wi-Fi credentials, router off/on, panel UART unplugged, panel UART shorted to 5 V. | Hold BOOT for more than 3 seconds and release to clear Wi-Fi credentials, then verify stock BLE provisioning is available; verify the device reconnects when the router returns; decoder resynchronizes and no crash occurs. | [ ] Not run; do not short UART to 5 V, which risks hardware damage |
 | T8.6 | Docs match reality | manual | Follow README from a clean clone on a second machine: clone --recurse-submodules, install.sh, export.sh, build, flash, provision over stock BLE, open the UI. | Every documented step works verbatim; IDF version, HTTP/HAP port map (80/8080), BLE provisioning, zone config, OTA and the 5 V level-shifting warning for GPIO16 are all present and correct. | [~] README now includes the wiring, BLE provisioning, UI/HAP ports, zone configuration, and OTA guidance; clean-clone walkthrough not run |
-| T8.7 | Release tagged and pushed | build | git log/status check, push main plus a v0.1.0 tag to https://github.com/nplourde/esp-homekit-paradox1738.git. | Working tree clean, remote main matches local HEAD, tag exists on the remote, submodule pointer still resolves from a fresh clone. | [ ] |
+| T8.7 | Release tagged and pushed | build | git log/status check, push main plus a v0.1.0 tag to https://github.com/nplourde/esp-homekit-paradox1738.git. | Working tree clean, remote main matches local HEAD, tag exists on the remote, submodule pointer still resolves from a fresh clone. | [ ] [x] PASS: working tree clean, `git push origin main` took the remote from `635115a` (WIP: M3 baseline) to `4e001de` - HEAD - and `git push origin v0.1.0` published the annotated tag `v0.1.0` (`645f07f`, object `4e001de`) whose message records what is verified on hardware and which TODO items remain open. `git ls-remote --tags origin` confirms the tag resolves to the pushed HEAD. No submodules are used, so the fresh-clone pointer check is not applicable; the clean-clone walkthrough itself is still unverified under `docs-wiring`.|
 
 ---
 
