@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "sdkconfig.h"
 #include <freertos/FreeRTOS.h>
@@ -342,6 +343,203 @@ static unsigned log_hap_database(void)
     return accessory_count;
 }
 
+/* T6.5: read back, as JSON, what the accessory database is advertising.
+ *
+ * A HomeKit controller cannot be asked over our network: GET /accessories answers
+ * 470 unless the requester holds a verified HAP session, and the only controller
+ * here is a paired iPhone that will not run a script for us. The values are still
+ * readable on the device, and comparing them against GET /api/status is what
+ * catches a bridge that updated its state model but not the accessory database -
+ * or the other way round.
+ *
+ * A zone is identified by characteristic-pointer identity: the handles found here
+ * are compared with the ones update_zone_hap_state() writes through. Matching on
+ * the advertised name would work right up to the point two zones share a name,
+ * which the configuration API allows.
+ *
+ * A characteristic the bridge does not carry on a service prints as -1, which is
+ * not a legal value for any characteristic reported here, so "not present" cannot
+ * be mistaken for "present and zero". That distinction is what T3.6 asks about for
+ * StatusActive and StatusTampered on the fire accessory.
+ *
+ * Threading: this runs on the web task while the panel task writes these
+ * characteristics. Each read lifts one uint8 or bool out of a hap_val_t union, so
+ * the worst a race can do is report a value that was already on its way out. The
+ * comparison tool re-samples and only reports a disagreement that survives.
+ */
+#define HOMEKIT_DUMP_BYTES 8192u
+
+static bool hap_read_uint(hap_serv_t *service, const char *uuid, int *value)
+{
+    hap_char_t *characteristic = hap_serv_get_char_by_uuid(service, uuid);
+    if (!characteristic) {
+        return false;
+    }
+    const hap_val_t *val = hap_char_get_val(characteristic);
+    if (!val) {
+        return false;
+    }
+    *value = val->u ? 1 : 0;
+    return true;
+}
+
+/* MotionDetected is written through the bool member of the union, the other state
+ * characteristics through the unsigned one. Reading the wrong member of a union
+ * means reading whatever the last writer left in the padding. */
+static bool hap_read_bool(hap_serv_t *service, const char *uuid, int *value)
+{
+    hap_char_t *characteristic = hap_serv_get_char_by_uuid(service, uuid);
+    if (!characteristic) {
+        return false;
+    }
+    const hap_val_t *val = hap_char_get_val(characteristic);
+    if (!val) {
+        return false;
+    }
+    *value = val->b ? 1 : 0;
+    return true;
+}
+
+static int zone_id_for_state_char(hap_char_t *state_char)
+{
+    for (int i = 0; i < PARADOX_MAX_ZONES; i++) {
+        if (g_zone_state_chars[i] == state_char) {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
+static void json_escape(const char *in, char *out, size_t out_len)
+{
+    size_t used = 0;
+    if (out_len == 0) {
+        return;
+    }
+    for (const char *p = in; *p && used + 2 < out_len; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            out[used++] = '\\';
+            out[used++] = (char)c;
+        } else if (c < 0x20) {
+            out[used++] = '.';
+        } else {
+            out[used++] = (char)c;
+        }
+    }
+    out[used] = '\0';
+}
+
+char *paradox_homekit_dump_json(void)
+{
+    char *out = malloc(HOMEKIT_DUMP_BYTES);
+    if (!out) {
+        return NULL;
+    }
+    char *cursor = out;
+    char *end = out + HOMEKIT_DUMP_BYTES;
+
+#define DUMP_APPEND(...)                                                      \
+    do {                                                                      \
+        int written = snprintf(cursor, (size_t)(end - cursor), __VA_ARGS__);    \
+        if (written < 0 || (size_t)written >= (size_t)(end - cursor)) {         \
+            free(out);                                                         \
+            return NULL;                                                       \
+        }                                                                      \
+        cursor += written;                                                     \
+    } while (0)
+
+    paradox_state_snapshot_t snapshot;
+    unsigned long long generation = 0;
+    if (paradox_state_snapshot(&snapshot) == PARADOX_STATE_OK) {
+        generation = (unsigned long long)snapshot.generation;
+    }
+    DUMP_APPEND("{\"generation\":%llu,\"accessories\":[", generation);
+
+    bool first = true;
+    unsigned sensors = 0;
+    for (hap_acc_t *accessory = hap_get_first_acc(); accessory;
+         accessory = hap_acc_get_next(accessory)) {
+        for (hap_serv_t *service = hap_acc_get_first_serv(accessory); service;
+             service = hap_serv_get_next(service)) {
+            const char *kind = NULL;
+            const char *state_uuid = NULL;
+            bool state_is_bool = false;
+            hap_char_t *state_char = hap_serv_get_char_by_uuid(
+                service, HAP_CHAR_UUID_CONTACT_SENSOR_STATE);
+            if (state_char) {
+                kind = "contact";
+                state_uuid = HAP_CHAR_UUID_CONTACT_SENSOR_STATE;
+            } else if ((state_char = hap_serv_get_char_by_uuid(
+                            service, HAP_CHAR_UUID_MOTION_DETECTED))) {
+                kind = "motion";
+                state_uuid = HAP_CHAR_UUID_MOTION_DETECTED;
+                state_is_bool = true;
+            } else if ((state_char = hap_serv_get_char_by_uuid(
+                            service, HAP_CHAR_UUID_SMOKE_DETECTED))) {
+                kind = "smoke";
+                state_uuid = HAP_CHAR_UUID_SMOKE_DETECTED;
+            } else if ((state_char = hap_serv_get_char_by_uuid(
+                            service, HAP_CHAR_UUID_LEAK_DETECTED))) {
+                kind = "leak";
+                state_uuid = HAP_CHAR_UUID_LEAK_DETECTED;
+            } else {
+                /* Protocol Information, Accessory Information, or the bridge's
+                 * own services: nothing here mirrors panel state. */
+                continue;
+            }
+
+            int state_value = -1;
+            if (state_is_bool) {
+                hap_read_bool(service, state_uuid, &state_value);
+            } else {
+                hap_read_uint(service, state_uuid, &state_value);
+            }
+            int fault = -1;
+            int tampered = -1;
+            int active = -1;
+            hap_read_uint(service, HAP_CHAR_UUID_STATUS_FAULT, &fault);
+            hap_read_uint(service, HAP_CHAR_UUID_STATUS_TAMPERED, &tampered);
+            if (strcmp(kind, "smoke") == 0) {
+                hap_read_uint(service, HAP_CHAR_UUID_STATUS_ACTIVE, &active);
+            }
+
+            char name[160];
+            name[0] = '\0';
+            hap_serv_t *info = hap_acc_get_serv_by_uuid(
+                accessory, HAP_SERV_UUID_ACCESSORY_INFORMATION);
+            hap_char_t *name_char = info
+                ? hap_serv_get_char_by_uuid(info, HAP_CHAR_UUID_NAME)
+                : NULL;
+            const hap_val_t *name_value = name_char
+                ? hap_char_get_val(name_char)
+                : NULL;
+            if (name_value && name_value->s) {
+                json_escape(name_value->s, name, sizeof(name));
+            }
+
+            const char *service_uuid = hap_serv_get_type_uuid(service);
+            DUMP_APPEND("%s{\"aid\":%lu,\"zone\":%d,\"kind\":\"%s\",\"name\":\"%s\","
+                        "\"hap_service_uuid\":\"%s\",\"state\":%d,"
+                        "\"status_fault\":%d,\"status_tampered\":%d",
+                        first ? "" : ",",
+                        (unsigned long)hap_acc_get_aid(accessory),
+                        zone_id_for_state_char(state_char), kind, name,
+                        service_uuid ? service_uuid : "",
+                        state_value, fault, tampered);
+            if (active >= 0) {
+                DUMP_APPEND(",\"status_active\":%d", active);
+            }
+            DUMP_APPEND("}");
+            first = false;
+            sensors++;
+        }
+    }
+    DUMP_APPEND("],\"sensors\":%u}", sensors);
+#undef DUMP_APPEND
+    return out;
+}
+
 static void log_heap_sample(void)
 {
     const uint32_t internal_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
@@ -631,6 +829,11 @@ static void hub_task_entry(void *arg)
         ESP_LOGE(TAG, "HAP database has %u accessories; expected %u",
                  accessory_count, registered_zones + 2);
     }
+#ifdef CONFIG_PARADOX_WEB_SERVER
+    /* Registered only once the database is complete, so a request that arrives
+     * earlier gets a clear 503 rather than a half-built picture. */
+    web_server_set_homekit_dump(paradox_homekit_dump_json);
+#endif
 
     /* Initialize the Paradox1738 Hardware */
 #ifdef CONFIG_PARADOX_LINK_SELFTEST

@@ -29,13 +29,15 @@ INTERVAL     ?= 60
 DURATION     ?= 86400
 OUT          ?= soak.csv
 TIMELINE_OUT ?= homekit-timeline.csv
+SAMPLES      ?= 8
 
 # IDF_PATH must be exported for idf.py; point it at the local checkout.
 export IDF_PATH ?= $(HOME)/Source/esp-idf
 
-.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest timeline timeline-selftest clean distclean
+.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest timeline timeline-selftest consistency consistency-selftest clean distclean
 
-check: host-test smoke-selftest soak-selftest latency-selftest robust-selftest timeline-selftest build build-sim
+check: host-test smoke-selftest soak-selftest latency-selftest robust-selftest \
+	timeline-selftest consistency-selftest build build-sim
 	@echo "check: PASS"
 
 host-test:
@@ -138,6 +140,25 @@ timeline:
 # The row maths of the timeline recorder, runnable with no device attached.
 timeline-selftest:
 	@./test/device/homekit_timeline.py --self-test
+
+# T6.5: does the esp-hap accessory database say the same thing as GET /api/status?
+# A HomeKit controller cannot be asked (HAP GET /accessories needs a paired
+# controller session), so the bridge serves its own database at
+# GET /api/debug/homekit and this compares the two. Needs panel debug on, and it
+# takes several status/database/status samples so a busy panel narrows the evidence
+# instead of voiding it - zones that move mid-sample are counted as moved, never
+# called a disagreement. The summary prints how many values were expected to be 1:
+# an agreement made only of zeros is worth little.
+#   make consistency HOST=192.168.4.30 SAMPLES=12
+consistency:
+	@test -n "$(HOST)" || { echo "consistency: HOST=<device address> is required"; exit 2; }
+	@./test/device/homekit_consistency.py --host "$(HOST)" --samples $(SAMPLES)
+
+# The comparison maths, runnable with no device attached, against responses copied
+# verbatim off a real module - and against disagreements injected on purpose, so a
+# comparison that ignored values could not pass.
+consistency-selftest:
+	@./test/device/homekit_consistency.py --self-test
 
 clean:
 	@$(MAKE) -C $(HOST_TEST_DIR) clean

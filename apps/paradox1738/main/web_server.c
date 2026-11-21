@@ -37,6 +37,14 @@
 #define WEB_LOGIN_MAX_FAILURES 5u
 #define WEB_LOGIN_LOCK_SECONDS 60u
 #define WEB_PBKDF2_ITERATIONS 20000u
+/* Route slots reserved in the HTTP server. Counted by hand once, and the count went
+ * wrong: the table reached exactly max_uri_handlers entries, adding one more route
+ * returned ESP_ERR_HTTPD_HANDLERS_FULL, and web_server_start() took the whole UI down
+ * with it - while HomeKit carried on, so the module still appeared healthy in Apple
+ * Home and had no web interface at all. The route count is asserted against this
+ * number at compile time now; the first failure was found in the boot log by
+ * test/device/smoke.sh, which fails on any error-level line. */
+#define WEB_URI_HANDLER_SLOTS 24u
 #define WEB_DEFAULT_PASSWORD "admin"
 
 static const char *TAG = "web_server";
@@ -211,6 +219,10 @@ static portMUX_TYPE s_session_mux = portMUX_INITIALIZER_UNLOCKED;
  * snapshot the bridge was built from, which is not kept.
  */
 static volatile bool s_homekit_pending;
+/* Set by the bridge once its accessory database is complete; see
+ * web_server_set_homekit_dump(). Read without a lock because the hub task writes
+ * it exactly once, before any value it guards is useful. */
+static web_homekit_dump_fn_t s_homekit_dump;
 
 /* Live Server-Sent Events sessions. Each one owns an async httpd request and a
  * task of its own, so a client that disappears without a clean close still has to
@@ -1235,6 +1247,40 @@ static char *raw_bytes_hex(const uint8_t *bytes, size_t len)
     return hex;
 }
 
+void web_server_set_homekit_dump(web_homekit_dump_fn_t dumper)
+{
+    s_homekit_dump = dumper;
+}
+
+/* T6.5: what the accessory database advertises, for comparison with /api/status.
+ * Gated on panel debug like the other debug views, and authenticated like
+ * everything else. The payload is malloc'd by the bridge: the web task's stack has
+ * roughly 4.5 KiB spare and the JSON is near 8 KiB, which is the lesson the
+ * /api/events stack overflow taught. */
+static esp_err_t debug_homekit_handler(httpd_req_t *request)
+{
+    if (!request_is_authorized(request)) {
+        return ESP_OK;
+    }
+    if (!panel_debug_enabled()) {
+        return send_error(request, "404 Not Found", "Panel debug is disabled");
+    }
+    web_homekit_dump_fn_t dumper = s_homekit_dump;
+    if (!dumper) {
+        return send_error(request, "503 Service Unavailable",
+                          "HomeKit bridge has not finished registering accessories");
+    }
+    char *json = dumper();
+    if (!json) {
+        return send_error(request, "503 Service Unavailable",
+                          "Could not serialise the accessory database");
+    }
+    httpd_resp_set_type(request, "application/json");
+    esp_err_t result = httpd_resp_sendstr(request, json);
+    free(json);
+    return result;
+}
+
 static esp_err_t debug_raw_handler(httpd_req_t *request)
 {
     if (!request_is_authorized(request)) {
@@ -2009,7 +2055,7 @@ esp_err_t web_server_start(paradox_config_t *config)
     httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
     server_config.server_port = 80;
     server_config.stack_size = 8192;
-    server_config.max_uri_handlers = 20;
+    server_config.max_uri_handlers = WEB_URI_HANDLER_SLOTS;
     server_config.max_open_sockets = 4;
     server_config.lru_purge_enable = true;
     server_config.uri_match_fn = httpd_uri_match_wildcard;
@@ -2052,9 +2098,16 @@ esp_err_t web_server_start(paradox_config_t *config)
          .handler = debug_panel_handler},
         {.uri = "/api/debug/raw", .method = HTTP_GET,
          .handler = debug_raw_handler},
+        {.uri = "/api/debug/homekit", .method = HTTP_GET,
+         .handler = debug_homekit_handler},
         {.uri = "/api/debug/raw/stream", .method = HTTP_GET,
          .handler = debug_raw_stream_handler},
     };
+    /* Compile time, because the failure at run time is not a degraded page: it is a
+     * dead web server. HomeKit keeps working through it, which is what makes the
+     * defect easy to live with and hard to notice. */
+    _Static_assert(sizeof(uris) / sizeof(uris[0]) <= WEB_URI_HANDLER_SLOTS,
+                   "route table outgrew WEB_URI_HANDLER_SLOTS; raise the slot count");
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
         err = httpd_register_uri_handler(s_server, &uris[i]);
         if (err != ESP_OK) {
