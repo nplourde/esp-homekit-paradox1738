@@ -55,6 +55,24 @@ size_t paradox_event_log_snapshot(paradox_event_log_entry_t *out,
     return count;
 }
 
+bool paradox_event_log_matches(const paradox_event_t *event,
+                               bool class_match, paradox_class_t class_filter,
+                               bool zone_match, unsigned zone_filter)
+{
+    if (event == NULL) {
+        return false;
+    }
+    if (class_match && event->cls != class_filter) {
+        return false;
+    }
+    if (zone_match &&
+        (event->cls != PARADOX_CLS_ZONE ||
+         event->category_id != (uint8_t)zone_filter)) {
+        return false;
+    }
+    return true;
+}
+
 void paradox_event_log_clear(void)
 {
     EVENT_LOG_LOCK();

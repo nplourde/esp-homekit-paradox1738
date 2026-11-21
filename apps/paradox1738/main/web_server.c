@@ -956,12 +956,9 @@ static esp_err_t events_get_handler(httpd_req_t *request)
     bool alloc_failed = false;
     for (size_t i = 0; i < count && added < limit; i++) {
         const paradox_event_t *event = &entries[i].event;
-        if (class_filter_set && event->cls != class_filter) {
-            continue;
-        }
-        if (zone_filter != 0 &&
-            (event->cls != PARADOX_CLS_ZONE ||
-             event->category_id != (uint8_t)zone_filter)) {
+        if (!paradox_event_log_matches(event, class_filter_set, class_filter,
+                                      zone_filter != 0,
+                                      (unsigned)zone_filter)) {
             continue;
         }
         cJSON *item = event_json(&entries[i]);
