@@ -124,8 +124,13 @@ class Device(object):
         return None
 
 
-def cases():
-    """(label, method, path, body, content type, origin, expected status)."""
+def cases(host="192.0.2.1"):
+    """(label, method, path, body, content type, origin, expected status).
+
+    `host` is the address the device is reached at, so the same-origin cases
+    can name origins that only look like it. The default is RFC 5737
+    documentation space, used by the self-test.
+    """
     long_name = "x" * (MAX_NAME + 1)
     ok_origin = None
     bad_origin = "http://not-this-device.example"
@@ -164,9 +169,22 @@ def cases():
         ("PUT zone after logout", "PUT", zone, body('{"name":"x"}'),
          "application/json", ok_origin, 401),
 
-        # Same-origin guard.
+        # Same-origin guard. There is no CSRF token on this device, so this is
+        # the only thing between a random page in the user's browser and a write
+        # to the panel configuration - the guard is `Origin` (or `Referer`)
+        # matching the Host the request was addressed to, and the cases below
+        # are the ways an attacker's origin can look superficially identical.
+        # paradox_same_origin.c holds the rule and test/host/test_same_origin.c
+        # pins the same strings offline; these confirm the running server applies
+        # them before it ever looks at the credentials.
         ("PUT cross-origin", "PUT", zone, body('{"name":"x"}'),
          "application/json", bad_origin, 403),
+        ("PUT origin is a host prefix", "PUT", zone, body('{"name":"x"}'),
+         "application/json", "http://%s.evil.example" % host, 403),
+        ("PUT origin names another port", "PUT", zone, body('{"name":"x"}'),
+         "application/json", "http://%s:9000" % host, 403),
+        ("PUT origin has no scheme", "PUT", zone, body('{"name":"x"}'),
+         "application/json", host, 403),
 
         # Zone index bounds, including the shapes strtol used to accept. The
         # /api/zones/<id> route is registered for PUT only, so a GET there is
@@ -264,7 +282,8 @@ def run(args):
     failures = []
     reboots = []
     unhandled = []
-    for label, method, path, body, content_type, origin, expected in cases():
+    for label, method, path, body, content_type, origin, expected in cases(
+            args.host):
         if label.endswith(ANONYMOUS_SUFFIXES):
             device.session = None
         try:
@@ -350,6 +369,9 @@ def self_test():
     labels = [case[0] for case in cases()]
     assert "PUT truncated object" in labels, labels
     assert "PUT oversized body" in labels and "PUT cross-origin" in labels, labels
+    assert "PUT origin is a host prefix" in labels and \
+        "PUT origin names another port" in labels and \
+        "PUT origin has no scheme" in labels, labels
     assert "PUT deeply nested" in labels and "PUT deeply nested strings" in labels, \
         labels
     assert len(labels) == len(set(labels)), "case labels must be unique"

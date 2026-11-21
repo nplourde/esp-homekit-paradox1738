@@ -181,6 +181,18 @@ successful `POST /api/auth/login` answers `{"password_change_required":false,
 "authenticated":true}` - the session cookie is only in the response headers, so
 `GET /api/auth/status` on a later request is what reports the live session.
 
+Requests that change something are also required to name the device in their
+`Origin` header, or in `Referer` when there is no `Origin`: the value has to be
+`http://` followed by the exact `Host` the request was addressed to, and then
+either the end of the header or a `/`, `?` or `#`. There is no CSRF token on this
+device, so that comparison is the entire defence against a page in the user's
+browser writing to the alarm configuration; a page at
+`http://192.168.4.30.evil.example`, an origin naming a different port, and an
+origin with no scheme are each rejected with `403 Same-origin request required`
+before the password is examined. The rule lives in `paradox_same_origin.c` so it
+can be tested without a web server, and the running module is checked against the
+same strings by `make robust`.
+
 To reset a forgotten web password, hold BOOT for more than 10 seconds to invoke
 the factory-reset path. It clears the admin hash and HomeKit data; the next boot
 signs in with the default password `admin` again.

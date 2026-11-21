@@ -25,6 +25,7 @@
 #include "paradox_event_log.h"
 #include "paradox_json_guard.h"
 #include "paradox_raw_tap.h"
+#include "paradox_same_origin.h"
 #include "paradox_state.h"
 #include "paradox1738.h"
 #include "paradox_config_store.h"
@@ -382,17 +383,7 @@ static esp_err_t receive_json(httpd_req_t *request, cJSON **json)
 
 static bool same_origin_url(const char *url, size_t url_size, const char *host)
 {
-    static const char prefix[] = "http://";
-    size_t prefix_size = sizeof(prefix) - 1u;
-    size_t host_size = strlen(host);
-    if (url_size < prefix_size + host_size ||
-        memcmp(url, prefix, prefix_size) != 0 ||
-        memcmp(url + prefix_size, host, host_size) != 0) {
-        return false;
-    }
-    size_t position = prefix_size + host_size;
-    return position == url_size || url[position] == '/' ||
-           url[position] == '?' || url[position] == '#';
+    return paradox_same_origin_url(url, url_size, host);
 }
 
 static bool request_is_same_origin(httpd_req_t *request)
