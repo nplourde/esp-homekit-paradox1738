@@ -186,6 +186,21 @@ block, and the web server task's own smallest free stack since boot
 is healthy when the low-water mark stays flat and the stack figure stays well
 above zero.
 
+`test/device/soak.sh` automates that observation over a long run; `make
+soak HOST=<device address>` runs it for 24 h, sampling once a minute
+(`INTERVAL` and `DURATION` override). Each row of the CSV carries the uptime,
+the three heap figures, the web stack watermark, the decoder counters, and the
+raw tap's `bytes_recorded` - the cumulative count of bytes taken off the panel
+wire, whose delta is the arrival signal. Read the two together: a stretch where
+`bytes_recorded` and `frames_ok` both freeze is the panel not transmitting, while
+`bytes_recorded` climbing and `frames_ok` flat means bytes are arriving but not
+framing. Uptime going backwards means the device reset, which the logger notes in
+the CSV and reports with a non-zero exit; it logs back in first, because sessions
+live in RAM only and a reboot invalidates them. The password is asked for (or
+taken from `PARADOX_WEB_PASSWORD`) rather than passed as an argument, so it does
+not land in shell history or `ps`. `make soak-selftest` checks the reboot
+detector with no device attached.
+
 The Debug tab can also mirror the panel UART byte-for-byte over Wi-Fi. The raw
 tap records every byte the UART task reads, including the bytes the decoder
 discards while it resynchronises framing, so a framing or phase problem can be

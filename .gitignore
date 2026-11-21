@@ -22,3 +22,7 @@ __pycache__/
 
 # Host unit-test artifacts
 test/host/build/
+
+# Soak logger output (T8.4)
+soak.csv
+soak-*.csv

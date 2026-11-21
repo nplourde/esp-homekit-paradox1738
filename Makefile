@@ -9,17 +9,23 @@
 #   make build-selftest # idf.py build with the link init/deinit self-test (T1.6)
 #   make build-configtest # idf.py build with the NVS config self-test (M2)
 #   make smoke        # reset + boot-log smoke test (T0.3); FLASH=1 to flash first
+#   make soak         # 24 h soak logger over the web API (T8.4); HOST= required
+#   make soak-selftest # soak logger's reboot detector, no device needed
 
 APP          := apps/paradox1738
 HOST_TEST_DIR := test/host
 PORT         ?= /dev/ttyUSB0
+HOST         ?=
+INTERVAL     ?= 60
+DURATION     ?= 86400
+OUT          ?= soak.csv
 
 # IDF_PATH must be exported for idf.py; point it at the local checkout.
 export IDF_PATH ?= $(HOME)/Source/esp-idf
 
-.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke clean distclean
+.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest clean distclean
 
-check: host-test smoke-selftest build build-sim
+check: host-test smoke-selftest soak-selftest build build-sim
 	@echo "check: PASS"
 
 host-test:
@@ -67,6 +73,19 @@ smoke:
 # The analyzer half of T0.3, runnable with no board attached.
 smoke-selftest:
 	@./test/device/smoke.sh --self-test
+
+# T8.4: poll heap/stack/decoder counters on a schedule for a day and catch a
+# silent reboot. Password comes from PARADOX_WEB_PASSWORD or a prompt, never a
+# command-line argument (it would land in shell history and in `ps`).
+#   make soak HOST=192.168.4.30
+soak:
+	@test -n "$(HOST)" || { echo "soak: HOST=<device address> is required"; exit 2; }
+	@test/device/soak.sh --host "$(HOST)" --interval $(INTERVAL) \
+		--duration $(DURATION) --out "$(OUT)"
+
+# The reboot detector of the soak logger, runnable with no device attached.
+soak-selftest:
+	@./test/device/soak.sh --self-test
 
 clean:
 	@$(MAKE) -C $(HOST_TEST_DIR) clean
