@@ -33,16 +33,42 @@ import sys
 import time
 
 COLUMNS = ("wall", "generation", "pushed_ms", "changed", "zones_open",
-           "zones_alarm", "zones_tamper", "zones_bypass", "fire",
-           "fire_last_change_ms")
+           "zones_alarm", "zones_tampered", "zones_bypassed", "fire",
+           "fire_fault", "fire_last_change_ms")
+
+# Copied verbatim from a live device's `GET /api/status` response (192.168.4.30,
+# 2026-11-20) so the tests below cannot drift from the wire format again. The
+# first version of this script asked for `tamper` and `bypass`; the device spells
+# them `tampered` and `bypassed`, and `dict.get()` answers None, so a tamper -
+# one of the two things the script exists to observe - would never have shown up.
+DEVICE_ZONE = {"alarm": False, "bypassed": False, "id": 3, "last_change_ms": 0,
+               "open": False, "tampered": False}
+DEVICE_FIRE = {"alarm": False, "fault": False, "last_change_ms": 0,
+               "restored": False}
+
+
+def zone(zid, **flags):
+    """A zone object shaped exactly like the device's, with `flags` overridden."""
+    out = dict(DEVICE_ZONE, id=zid)
+    out.update(flags)
+    return out
+
+
+def fire(**flags):
+    out = dict(DEVICE_FIRE)
+    out.update(flags)
+    return out
 
 
 def signature(status):
-    """What this script considers "a change" - the state HomeKit mirrors."""
-    zones = [(z["id"], z.get("open"), z.get("alarm"), z.get("tamper"),
-              z.get("bypass")) for z in status.get("zones", [])]
-    fire = status.get("fire", {})
-    return (tuple(zones), bool(fire.get("alarm")), bool(fire.get("tamper")))
+    """What this script considers "a change" - the state HomeKit mirrors.
+
+    Key names are the device's own, not invented ones: see DEVICE_ZONE above.
+    """
+    zones = [(z["id"], z.get("open"), z.get("alarm"), z.get("tampered"),
+              z.get("bypassed")) for z in status.get("zones", [])]
+    state = status.get("fire", {})
+    return (tuple(zones), bool(state.get("alarm")), bool(state.get("fault")))
 
 
 def changed_summary(status):
@@ -52,27 +78,27 @@ def changed_summary(status):
     Home renders them through different characteristics.
     """
     parts = []
-    for zone in status.get("zones", []):
-        if not (zone.get("open") or zone.get("alarm") or zone.get("tamper")):
+    for z in status.get("zones", []):
+        if not (z.get("open") or z.get("alarm") or z.get("tampered")):
             continue
         flags = "".join(letter for letter, key in (("O", "open"), ("A", "alarm"),
-                                                   ("T", "tamper"))
-                        if zone.get(key))
-        parts.append("zone%s=%s@%s" % (zone["id"], flags,
-                                       zone.get("last_change_ms")))
-    fire = status.get("fire", {})
-    if fire.get("alarm") or fire.get("tamper"):
-        parts.append("fire=%s@%s" % ("A" if fire.get("alarm") else "T",
-                                     fire.get("last_change_ms")))
+                                                   ("T", "tampered"))
+                        if z.get(key))
+        parts.append("zone%s=%s@%s" % (z["id"], flags, z.get("last_change_ms")))
+    state = status.get("fire", {})
+    flags = "".join(letter for letter, key in (("A", "alarm"), ("F", "fault"))
+                    if state.get(key))
+    if flags:
+        parts.append("fire=%s@%s" % (flags, state.get("last_change_ms")))
     return " ".join(parts)
 
 
 def row(status):
     """One CSV row for one status push. Split out so the maths is testable."""
-    fire = status.get("fire", {})
+    state = status.get("fire", {})
 
-    def ids(flag):
-        return [z["id"] for z in status.get("zones", []) if z.get(flag)]
+    def ids(key):
+        return [z["id"] for z in status.get("zones", []) if z.get(key)]
 
     return [
         time.strftime("%H:%M:%S"),
@@ -81,10 +107,11 @@ def row(status):
         changed_summary(status) or "-",
         ids("open"),
         ids("alarm"),
-        ids("tamper"),
-        ids("bypass"),
-        bool(fire.get("alarm")),
-        fire.get("last_change_ms"),
+        ids("tampered"),
+        ids("bypassed"),
+        bool(state.get("alarm")),
+        bool(state.get("fault")),
+        state.get("last_change_ms"),
     ]
 
 
@@ -186,51 +213,71 @@ def record(host, port, password, duration, out_path):
 
 
 def self_test():
-    """The row maths with no device: what counts as a change, and what a row says."""
-    def zone(zid, **kw):
-        out = {"id": zid, "open": False, "alarm": False, "tamper": False,
-               "bypass": False, "last_change_ms": 0}
-        out.update(kw)
-        return out
+    """The row maths with no device: what counts as a change, and what a row says.
 
-    quiet = {"generation": 1, "pushed_ms": 1000,
-             "zones": [zone(1), zone(2)], "fire": {"alarm": False,
-                                                   "last_change_ms": 0}}
+    Every fixture here is built by zone()/fire(), which copy their key names from
+    DEVICE_ZONE/DEVICE_FIRE above. That is the point: the first version of this
+    script read invented key names, its self-test used the same invented names, and
+    so the two agreed with each other and with nothing on the device.
+    """
+    checks = 0
+
+    def expect(condition, what):
+        nonlocal checks
+        assert condition, what
+        checks += 1
+
+    expect(set(zone(1)) == set(DEVICE_ZONE), "zone fixture keeps the device's keys")
+    expect(set(fire()) == set(DEVICE_FIRE), "fire fixture keeps the device's keys")
+    for key in ("open", "alarm", "tampered", "bypassed"):
+        expect(key in DEVICE_ZONE, "the script reads %s, which the device sends" % key)
+    for key in ("alarm", "fault"):
+        expect(key in DEVICE_FIRE, "the script reads fire.%s, which the device sends" % key)
+
+    quiet = {"generation": 1, "pushed_ms": 1000, "zones": [zone(1), zone(2)],
+             "fire": fire()}
     opened = {"generation": 2, "pushed_ms": 1123,
               "zones": [zone(1, open=True, last_change_ms=1039), zone(2)],
-              "fire": {"alarm": False, "last_change_ms": 0}}
-    alarming = {"generation": 3, "pushed_ms": 1300,
-                "zones": [zone(1, open=True, alarm=True, last_change_ms=1240),
-                          zone(2, tamper=True, last_change_ms=1250)],
-                "fire": {"alarm": True, "tamper": False, "last_change_ms": 1260}}
+              "fire": fire()}
+    tampered = {"generation": 3, "pushed_ms": 1300,
+                "zones": [zone(1, tampered=True, last_change_ms=1250), zone(2)],
+                "fire": fire()}
+    alarming = {"generation": 4, "pushed_ms": 1500,
+                "zones": [zone(1, open=True, alarm=True, last_change_ms=1440),
+                          zone(2, tampered=True, last_change_ms=1450)],
+                "fire": fire(alarm=True, last_change_ms=1460)}
+    trouble = {"generation": 5, "pushed_ms": 1700, "zones": [zone(1), zone(2)],
+               "fire": fire(fault=True, last_change_ms=1690)}
 
-    assert signature(quiet) != signature(opened), "a zone opening must be a change"
-    assert signature(quiet) != signature(alarming), "alarm must be a change"
-    assert signature(opened) == signature(dict(opened)), \
-        "the same state must not look like a change"
+    expect(signature(quiet) != signature(opened), "a zone opening is a change")
+    expect(signature(quiet) != signature(tampered),
+           "a tamper with nothing else moving is a change - the bug this caught")
+    expect(signature(quiet) != signature(trouble),
+           "fire-loop trouble is a change even with no zone open")
+    expect(signature(opened) == signature(dict(opened)),
+           "the same state pushed twice is not a change")
 
     fields = row(opened)
-    assert fields[3] == "zone1=O@1039", fields[3]
-    assert fields[4] == [1] and fields[5] == [], fields
-    assert fields[8] is False, "an open zone is not a fire alarm"
+    expect(fields[3] == "zone1=O@1039", fields[3])
+    expect(fields[4] == [1] and fields[5] == [] and fields[6] == [], fields)
+    expect(fields[8] is False and fields[9] is False, "an open zone is not a fire alarm")
 
     fields = row(alarming)
-    assert fields[3] == "zone1=OA@1240 zone2=T@1250 fire=A@1260", fields[3]
-    assert fields[4] == [1], "open-and-alarming still reads open"
-    assert fields[5] == [1] and fields[6] == [2], fields
-    assert fields[8] is True and fields[9] == 1260, fields
+    expect(fields[3] == "zone1=OA@1440 zone2=T@1450 fire=A@1460", fields[3])
+    expect(fields[4] == [1] and fields[5] == [1] and fields[6] == [2], fields)
+    expect(fields[8] is True and fields[10] == 1460, fields)
 
-    # A tampered but closed zone is still worth a row: Home renders the
-    # tamper characteristic on a contact sensor that never opened.
-    tamper_only = {"generation": 4, "pushed_ms": 2000,
-                   "zones": [zone(1, tamper=True, last_change_ms=1990), zone(2)],
-                   "fire": {"alarm": False, "last_change_ms": 0}}
-    assert signature(tamper_only) != signature(quiet)
-    assert row(tamper_only)[3] == "zone1=T@1990", row(tamper_only)[3]
-    assert row(tamper_only)[4] == [], "a tampered zone is not open"
+    fields = row(tampered)
+    expect(fields[3] == "zone1=T@1250", fields[3])
+    expect(fields[4] == [] and fields[6] == [1],
+           "a tampered zone reads tampered, not open")
 
-    assert len(COLUMNS) == len(row(quiet)), "header and row must stay in step"
-    print("timeline self-test: PASS (%d checks)" % 14)
+    fields = row(trouble)
+    expect(fields[3] == "fire=F@1690", fields[3])
+    expect(fields[8] is False and fields[9] is True, "fire fault is not fire alarm")
+
+    expect(len(COLUMNS) == len(row(quiet)), "header and row stay in step")
+    print("timeline self-test: PASS (%d checks)" % checks)
     return 0
 
 
