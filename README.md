@@ -60,6 +60,7 @@ make soak HOST=<address>      # watch memory, stack and resets over hours
 make latency HOST=<address>   # measure decode-to-push delay on a real panel
 make robust HOST=<address>    # malformed and unauthorized requests against a module
 make timeline HOST=<address>  # record what the bridge publishes while you trigger zones
+make consistency HOST=<address> # check the HomeKit database against GET /api/status
 ```
 
 - `test/host/` — Unity unit tests for pure logic, compiled with the host `gcc`
@@ -90,6 +91,18 @@ make timeline HOST=<address>  # record what the bridge publishes while you trigg
   it in a terminal while you walk the doors and watch Apple Home, then compare the two
   timelines. It re-logs in when another client takes the single web session, and
   `--self-test` checks which states it considers a change.
+- `test/device/homekit_consistency.py` (`make consistency`, `make consistency-selftest`) —
+  answers "does the esp-hap accessory database say the same thing as `GET /api/status`?". A
+  HomeKit controller cannot be asked: HAP `GET /accessories` needs a verified controller session
+  (`470` / `{"status":-70401}` unpaired), so the bridge serves its own database at
+  `GET /api/debug/homekit`. The tool compares the two using the mapping app_main.c actually
+  implements - contact and motion mirror `open`, smoke and leak mirror `in_alarm`, StatusFault is
+  `in_alarm || bypassed` (a bypass is therefore shown to HomeKit as a fault), StatusTampered is
+  `tampered` - and it only compares a zone that read identically before and after the database
+  read, so a busy panel narrows the evidence instead of voiding it. The summary prints how many
+  compared values were expected to be 1: an agreement made only of zeros proves little, and the
+  self-test (57 checks) runs against responses copied verbatim off a module plus disagreements
+  injected on purpose.
 - Request bodies are bounded before the JSON parser sees them: 512 bytes, and at
   most eight levels of nested containers (`test/host/test_json_guard.c` covers the
   counting, including brackets that sit inside strings). cJSON recurses once per
@@ -219,6 +232,7 @@ change, and logout are under `/api/auth/`. Authenticated API endpoints:
 | `PUT /api/debug` | Set `{"enabled":true}` or `{"enabled":false}` |
 | `GET /api/debug/panel` | Recent raw frames and decoder counters; available only when panel debug is enabled |
 | `GET /api/debug/raw?bytes=N` | Verbatim panel UART bytes as hex, newest last, plus ring statistics; available only when panel debug is enabled |
+| `GET /api/debug/homekit` | The values the esp-hap accessory database currently holds for every sensor service - state characteristic, StatusFault, StatusTampered, and StatusActive where present - so the HomeKit view can be compared with `GET /api/status` without a paired controller; available only when panel debug is enabled |
 | `GET /api/debug/raw/stream` | Server-sent live stream of the same raw bytes (`event: raw`) |
 | `GET /api/debug/simulator` | Check whether the runtime recorded-frame test is available or running |
 | `POST /api/debug/simulator` | Start a one-shot recorded-frame test from the Debug tab |

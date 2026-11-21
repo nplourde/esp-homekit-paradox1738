@@ -233,15 +233,24 @@ def compare(status_before, zone_config, dump, status_after):
         if state_after is None or strip_time(state_before) != strip_time(state_after):
             moved.append(zone_id)
             continue
+        config = config_by_id.get(zone_id)
         items = by_zone.get(zone_id)
         if not items:
+            if config and not config["enabled"]:
+                # The bridge registers accessories for enabled zones only, so a
+                # disabled zone with nothing in HomeKit is the design working. The
+                # state model still reports all 16 zones, which is why this has to be
+                # said out loud rather than assumed: the first run of this tool called
+                # ten correctly absent accessories failures, on a module with ten
+                # zones disabled.
+                continue
             findings.append((
                 "fail", "missing-accessory", "zone %d" % zone_id,
-                "the state model holds this zone but no sensor service advertises it"))
+                "the zone is enabled and the state model holds it, but no sensor "
+                "service advertises it"))
             continue
         item = items[0]
         compared += 1
-        config = config_by_id.get(zone_id)
 
         if config and config["type"] != item["kind"]:
             findings.append((
@@ -498,12 +507,26 @@ def self_test():
     check(any(f[0] == "fail" and f[1] == "name-mismatch" for f in findings),
           "a stale HomeKit name with no pending-restart flag is a real disagreement")
 
-    # Missing and extra accessories.
+    # Missing and extra accessories. An enabled zone with no accessory is the
+    # failure; a disabled zone with no accessory is correct and must stay quiet.
     findings, _, _, _ = compare(status, config, {"generation": 0, "sensors": 1,
                                               "accessories": [hap_item(1)]},
                              status)
     check(any(f[1] == "missing-accessory" for f in findings),
-          "a zone the state model holds with no accessory advertising it must be caught")
+          "an enabled zone the state model holds with no accessory must be caught")
+    disabled_config = {"reboot_required_for_homekit": False,
+                       "zones": [zone_cfg(1),
+                                 zone_cfg(2, enabled=False, name="Zone 2")]}
+    findings, compared_disabled, _, _ = compare(
+        status, disabled_config,
+        {"generation": 0, "sensors": 2,
+         "accessories": [hap_item(1), dict(DEVICE_HAP_FIRE)]}, status)
+    check(not [f for f in findings if f[0] == "fail"],
+          "a disabled zone with no accessory in HomeKit is the design working, not a "
+          "disagreement: %s" % findings)
+    check(compared_disabled == 2,
+          "the correctly absent accessory must not count as compared: %d"
+          % compared_disabled)
     extra = {"generation": 0, "sensors": 3,
              "accessories": [hap_item(1), hap_item(2, aid=3),
                              hap_item(99, aid=99), dict(DEVICE_HAP_FIRE)]}
