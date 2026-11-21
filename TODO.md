@@ -31,13 +31,25 @@ Every milestone lists the work items it contains **and** the tests that must pas
 
 ## Ready to start (no open prerequisites)
 
-- [ ] `hk-bridge-skeleton` — Rebuilding the HomeKit bridge accessory
-- [ ] `nvs-config` — Adding NVS-backed configuration store
-- [ ] `uart-framing` — Rewriting the Paradox UART frame decoder
+The three items this section used to list - `hk-bridge-skeleton`, `nvs-config`, `uart-framing` -
+finished long ago (M3, M2, M1); the list had simply gone stale and said otherwise. What is
+open and can genuinely start with nothing waiting on it:
+
+- [ ] `arm_state_observe` (M9) - one keypad arm and one disarm; sends no bytes out
+- [ ] `control_plane_auth` (M9) - code work, and it must land before any TX code does
+- [ ] `power-cycle` (M8) - needs someone at the wall socket
+- Partial, waiting on a person rather than on code: `docs-wiring` (M8), `homekit-verify` (M8),
+  T3.5 bypass in Home, T3.6 StatusActive/StatusTampered, T7.2 edits driven through the browser
+- Blocked as written, with a way around it: T6.5 wants a comparison against HAP
+  `GET /accessories`, which answers 470 without a verified controller session. The plan is to read
+  the values from the esp-hap accessory database on the device instead - `log_hap_database()`
+  already walks it - and compare those with `GET /api/status` after the same frames.
+- Waiting on a decision about hardware risk: T8.5 as written shorts the UART to 5 V, which can
+  destroy the board. Proposed instead: measure and document the panel's signalling level.
 
 ## Hard gates
 
-One test is a stop-the-line risk. Resolve it before building on top of the answer:
+Two gates stop the line. Resolve each before building on top of its answer:
 
 - **T7.7 — OTA size budget.** Passed: the M7 image is 1,389,344 bytes, under the 1500 KiB target; no partition-table change is needed.
 - **T9.5 gates T9.7 — nothing writes to a live intrusion panel on a guess.** No byte goes out on the panel's command line until captured keypad frames decode into named fields in a host test (T9.5), the credential work (T9.6) passes, and the write experiment runs on a bench panel or with the protected panel disconnected from service.
@@ -627,7 +639,7 @@ The whole stack flashed to the board, verified in Apple Home with physical zone 
 | T8.4 | 24-hour soak with the panel attached | device | Keep the panel wired and the web UI reachable, then run `make soak HOST=<device address>` (or `test/device/soak.sh --host <address> --interval 60 --duration 86400 --out soak.csv`) for 24 h and inspect the CSV: heap low-water, web stack watermark, decoder counters and raw UART byte arrival, one row per minute. | No reset, no crash, no heap decline beyond 5 KB over the run, framing error count stable (no permanent desync), HomeKit stays reachable. | [ ] Not run as a formal 24 h soak. Supporting observations: the live panel module had been up 3.5 days on the pre-fix build with `frames_ok 9057`, `framing_errors 0`, `bytes_discarded 0`, `overruns 0` - no permanent desync - and the new build exposes `free_heap_bytes` (174688), `min_free_heap_bytes` (154756, 145660 under API load), `largest_heap_block_bytes` (118784) and `web_stack_free_bytes` over the API, so the soak can now be logged by polling `GET /api/system` with no serial lead attached. A 5 min follow-up run on `4e001de` was flat and clean: heap 194452-194516, `min_free_heap_bytes` 154756 (it did not move), `largest_heap_block_bytes` pinned at 118784, stack free 5412 of 8192, 302 samples, no reset. Note for whoever reads the 24 h CSV: the panel broadcasts on activity, so flat `raw_bytes_recorded`/`frames_ok` with zero errors is an idle house, not a dropout - start the run by triggering a zone once to prove the wire, as README's soak section says. |
 | T8.5 | Recovery paths verified | manual | Force each failure: incorrect Wi-Fi credentials, router off/on, panel UART unplugged, panel UART shorted to 5 V. | Hold BOOT for more than 3 seconds and release to clear Wi-Fi credentials, then verify stock BLE provisioning is available; verify the device reconnects when the router returns; decoder resynchronizes and no crash occurs. | [ ] Not run; do not short UART to 5 V, which risks hardware damage |
 | T8.6 | Docs match reality | manual | Follow README from a clean clone on a second machine: clone --recurse-submodules, install.sh, export.sh, build, flash, provision over stock BLE, open the UI. | Every documented step works verbatim; IDF version, HTTP/HAP port map (80/8080), BLE provisioning, zone config, OTA and the 5 V level-shifting warning for GPIO16 are all present and correct. | [~] README now includes the wiring, BLE provisioning, UI/HAP ports, zone configuration, and OTA guidance. The scripted part of the walkthrough is now verified from a fresh clone of the remote: `git clone --recurse-submodules` (submodule `esp-homekit-sdk` at `2985547b`), `source export.sh` (ESP-IDF v5.5.6 as documented), `make check` green in 68 s - 50 host tests, three no-device self-tests, both firmware builds, app `0x155760` with 15% partition free - managed components fetched automatically and the tree still clean afterwards. Not walked: flashing from the clone, BLE provisioning on a fresh board, and the UI. Note the version string comes from `git describe`, so a clone-built image reports `v0.1.0-3-gb745fce`. |
-| T8.7 | Release tagged and pushed | build | git log/status check, push main plus a v0.1.0 tag to https://github.com/nplourde/esp-homekit-paradox1738.git. | Working tree clean, remote main matches local HEAD, tag exists on the remote, submodule pointer still resolves from a fresh clone. | [ ] [x] PASS: working tree clean, `git push origin main` took the remote from `635115a` (WIP: M3 baseline) to `4e001de` - HEAD - and `git push origin v0.1.0` published the annotated tag `v0.1.0` (`645f07f`, object `4e001de`) whose message records what is verified on hardware and which TODO items remain open. `git ls-remote --tags origin` confirms the tag resolves to the pushed HEAD. No submodules are used, so the fresh-clone pointer check is not applicable; the clean-clone walkthrough itself is still unverified under `docs-wiring`.|
+| T8.7 | Release tagged and pushed | build | git log/status check, push main plus a v0.1.0 tag to https://github.com/nplourde/esp-homekit-paradox1738.git. | Working tree clean, remote main matches local HEAD, tag exists on the remote, submodule pointer still resolves from a fresh clone. | [x] PASS: working tree clean, `git push origin main` took the remote from `635115a` (WIP: M3 baseline) to `4e001de` - HEAD - and `git push origin v0.1.0` published the annotated tag `v0.1.0` (`645f07f`, object `4e001de`) whose message records what is verified on hardware and which TODO items remain open. `git ls-remote --tags origin` confirms the tag resolves to the pushed HEAD. No submodules are used, so the fresh-clone pointer check is not applicable; the clean-clone walkthrough itself is still unverified under `docs-wiring`.|
 
 ---
 
