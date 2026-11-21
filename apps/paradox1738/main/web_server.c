@@ -56,6 +56,8 @@ static const char *INDEX_HTML =
     "repeat(auto-fit,minmax(14rem,1fr));gap:.5rem}.zone{border:1px solid #d5dce3;"
     "padding:.65rem;border-radius:.4rem}.zone button{width:100%;margin-top:.5rem}"
     ".hidden{display:none!important}.muted{color:#536271;font-size:.92rem}"
+    ".warn{color:#8a1f1f;background:#fdecea;border:.06rem solid #f0b7b3;"
+    "padding:.5rem .65rem;border-radius:.35rem}"
     "pre{white-space:pre-wrap;overflow-wrap:anywhere}#notice{color:#7a3d00}"
     "@media(max-width:390px){body{padding:.65rem}nav{gap:.25rem}nav button{padding:.45rem}}"
     "</style><h1>Paradox Bridge</h1><p id=\"message\" role=\"status\" aria-live=\"polite\"></p>"
@@ -71,6 +73,8 @@ static const char *INDEX_HTML =
     "<div id=\"status-grid\" class=\"grid\"></div></section>"
     "<section data-panel=\"zones\" class=\"hidden\"><h2>Zone configuration</h2>"
     "<p class=\"muted\">Changes are saved immediately. HomeKit applies them after a reboot.</p>"
+    "<p id=\"homekit-pending\" class=\"warn hidden\">HomeKit is still showing the accessory names and "
+    "types from before the last change. Restart the bridge to apply them.</p>"
     "<div id=\"zone-list\" class=\"grid\"></div></section>"
     "<section data-panel=\"events\" class=\"hidden\"><h2>Panel events</h2>"
     "<button id=\"refresh-events\">Refresh</button> <button id=\"clear-events\">Clear log</button>"
@@ -123,6 +127,7 @@ static const char *INDEX_HTML =
     "$('#ota-info').textContent=`Upload limit ${s.update_partition_bytes} bytes. Device will restart after validation.`;"
     "$('#debug-enabled').checked=s.panel_debug_enabled};"
     "const loadZones=async()=>{const data=await request('/api/zones'),root=$('#zone-list');root.replaceChildren();"
+    "$('#homekit-pending').classList.toggle('hidden',!data.reboot_required_for_homekit);"
     "for(const z of data.zones){const box=document.createElement('div');box.className='zone';"
     "const title=document.createElement('strong');title.textContent=`Zone ${z.id}`;box.append(title);"
     "const name=document.createElement('input');name.value=z.name;name.setAttribute('aria-label',`Zone ${z.id} name`);box.append(name);"
@@ -130,7 +135,7 @@ static const char *INDEX_HTML =
     "for(const t of ['contact','motion','smoke','leak']){const o=document.createElement('option');o.value=t;o.textContent=t;o.selected=t===z.type;type.append(o)}box.append(type);"
     "const label=document.createElement('label'),enabled=document.createElement('input');enabled.type='checkbox';enabled.checked=z.enabled;enabled.style.width='auto';"
     "label.append(enabled,document.createTextNode(' Enabled'));box.append(label);"
-    "const save=document.createElement('button');save.textContent='Save zone';save.onclick=async()=>{try{await request(`/api/zones/${z.id}`,jsonOptions('PUT',{name:name.value,type:type.value,enabled:enabled.checked}));msg.textContent=`Zone ${z.id} saved; reboot required for HomeKit.`}catch(e){showError(e)}};box.append(save);root.append(box)}};"
+    "const save=document.createElement('button');save.textContent='Save zone';save.onclick=async()=>{try{await request(`/api/zones/${z.id}`,jsonOptions('PUT',{name:name.value,type:type.value,enabled:enabled.checked}));msg.textContent=`Zone ${z.id} saved; reboot required for HomeKit.`;$('#homekit-pending').classList.remove('hidden')}catch(e){showError(e)}};box.append(save);root.append(box)}};"
     "const loadEvents=async()=>{const d=await request('/api/events?limit=64'),root=$('#event-list');root.replaceChildren();"
     "if(!d.events.length){root.textContent='No events recorded since boot.';return}for(const e of d.events){const p=document.createElement('p');"
     "p.textContent=`Uptime ${formatUptime(e.timestamp_ms)} · ${e.event} · ${e.class} ${e.category_id}`;root.append(p)}};"
@@ -188,6 +193,24 @@ static unsigned s_login_failures;
 static SemaphoreHandle_t s_config_mutex;
 static volatile bool s_server_running;
 static portMUX_TYPE s_session_mux = portMUX_INITIALIZER_UNLOCKED;
+
+/*
+ * True once a zone edit has landed that the running HomeKit bridge cannot
+ * apply. The bridge copies accessory names, service types and which zones
+ * exist out of the zone configuration when it builds, and a paired bridge's
+ * accessory database cannot be rebuilt in place, so those fields only follow an
+ * edit after a restart.
+ *
+ * It is RAM-only on purpose: a restart is the only thing that can clear it, and
+ * a restart is exactly when the bridge stops being stale. So it starts false at
+ * every boot - the bridge has just been built from the current configuration -
+ * and the only way back to false is to do the thing the flag asks for.
+ *
+ * A conservative true: an edit that writes back the same values still reports
+ * HomeKit as stale, because deciding otherwise would mean comparing against the
+ * snapshot the bridge was built from, which is not kept.
+ */
+static volatile bool s_homekit_pending;
 
 /* Live Server-Sent Events sessions. Each one owns an async httpd request and a
  * task of its own, so a client that disappears without a clean close still has to
@@ -688,7 +711,7 @@ static esp_err_t zones_get_handler(httpd_req_t *request)
                           "Response allocation failed");
     }
     if (cJSON_AddBoolToObject(root, "reboot_required_for_homekit",
-                              false) == NULL) {
+                              s_homekit_pending) == NULL) {
         cJSON_Delete(root);
         cJSON_Delete(zones);
         return send_error(request, "500 Internal Server Error",
@@ -829,11 +852,15 @@ static esp_err_t zone_put_handler(httpd_req_t *request)
     if (result != PARADOX_CONFIG_OK) {
         return send_error(request, "400 Bad Request", "Invalid zone configuration");
     }
+    /* The write is in NVS and visible to the API from here on, but HomeKit is
+     * showing the accessories as they were when the bridge built them. */
+    s_homekit_pending = true;
     cJSON *response = cJSON_CreateObject();
     if (response == NULL ||
         cJSON_AddBoolToObject(response, "ok", true) == NULL ||
         cJSON_AddNumberToObject(response, "zone_id", zone_id) == NULL ||
-        cJSON_AddBoolToObject(response, "reboot_required_for_homekit", true) == NULL) {
+        cJSON_AddBoolToObject(response, "reboot_required_for_homekit",
+                              s_homekit_pending) == NULL) {
         cJSON_Delete(response);
         return send_error(request, "500 Internal Server Error",
                           "Response allocation failed");
