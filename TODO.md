@@ -27,6 +27,7 @@ Every milestone lists the work items it contains **and** the tests that must pas
 | M6 | Web APIs for config, status, log, debug | 4 | 8 | [~] |
 | M7 | Web UI and firmware update | 2 | 7 | [~] |
 | M8 | Integrated release on real hardware | 5 | 7 | [~] |
+| M9 | Panel control direction - observe, capture, then write | 6 | 7 | [ ] |
 
 ## Ready to start (no open prerequisites)
 
@@ -39,6 +40,7 @@ Every milestone lists the work items it contains **and** the tests that must pas
 One test is a stop-the-line risk. Resolve it before building on top of the answer:
 
 - **T7.7 — OTA size budget.** Passed: the M7 image is 1,389,344 bytes, under the 1500 KiB target; no partition-table change is needed.
+- **T9.5 gates T9.7 — nothing writes to a live intrusion panel on a guess.** No byte goes out on the panel's command line until captured keypad frames decode into named fields in a host test (T9.5), the credential work (T9.6) passes, and the write experiment runs on a bench panel or with the protected panel disconnected from service.
 
 ---
 
@@ -629,6 +631,66 @@ The whole stack flashed to the board, verified in Apple Home with physical zone 
 
 ---
 
+## M9 — Panel control direction: observe, capture, then write
+
+The bridge is receive-only today. `uart_write_bytes` appears nowhere in the app; `paradox1738.c:351`
+configures UART2 with TX on GPIO17 - wired to the panel's RX line, the line the keypads transmit on -
+and nothing ever drives it. HomeKit exposes sensor services only (contact, motion, smoke, leak, plus
+StatusFault and StatusTampered), and the web UI writes only to the module's own zone configuration.
+So there is no arm, disarm or alarm-cancel from any network today, and this milestone does not change
+that until there is evidence about the command frames and a credential model fit for a control plane.
+The observe and capture stages send zero bytes.
+
+### Work items
+
+- [ ] `arm_state_observe` — Reading the arming events that already arrive
+  The decoder already names EventId 6 (remote arm/disarm), 13 Arm, 14 Special arm, 15 Disarm, 16 Disarm
+  after alarm, 17 Cancel alarm, 18 Special disarm, and 33-36 (keyswitch arm / disarm / disarm-after-alarm
+  / cancel), and classifies ARMED and DISARMED. Arm and disarm at the keypad and write down what
+  actually arrives: which EventId, which category value, and whether the category names a partition or a
+  user code. Baseline for the diff: after the `68b06fd` boot the log holds 64 events and contains only
+  EventIds 0, 1 and 2 - no arming traffic has been seen on this bus yet, which is itself a finding.
+- [ ] `arm_state_model` — Carrying arming state somewhere it can be seen, read-only
+  `paradox_state_snapshot_t` holds zones and fire only, so `paradox_state_apply_event()` answers
+  UNSUPPORTED_EVENT (paradox_state.c:150) and arming frames die in the in-memory event log. Add
+  partition-scoped fields (armed, mode if it is derivable, last arm/disarm time, which code did it), a
+  change kind for the observer, `/api/status` fields and a dashboard line.
+- [ ] `hk_arming_surface` — Deciding whether arming state reaches Apple Home at all
+  `SecuritySystem` requires TargetSecurityState, which is writable, so a read-only arming indicator
+  cannot be a legal HomeKit service. Record the decision and the alternatives (dashboard, event log,
+  Home automations driven by other sensors), and note that a bridged partition accessory must not force
+  re-pairing the 16 existing zone accessories - renames already propagate without a re-pair, but a new
+  accessory is something to verify, not to assume.
+- [ ] `rx_bus_capture` — Learning the command frames by listening, never by writing
+  Put a receiver on the panel's RX line and record what a real keypad sends when it arms, disarms and
+  cancels an alarm. Reuse the raw tap and the hex view already in the panel-debug API, and put the
+  captured frames into the recorded-frame store so that decoding them becomes a host test. The framing,
+  sequence and acknowledgement rules are all unknown: this item's whole output is evidence.
+- [ ] `control_plane_auth` — Credentials before any TX code exists
+  The LAN UI is one shared password over plain HTTP with a 5-failure/60 s lockout, and its default is
+  `admin`. Before anything can disarm the house: no default password, operator and admin credentials
+  split so an operator cannot rewrite configuration, network control behind an NVS opt-in that ships
+  off, and a bridge-side record of every command so it lines up with the panel's own audit trail -
+  EventId 13 and 15 carry which code was used.
+- [ ] `panel_write_path` — Sending commands, on a bench panel
+  Command builder, sequence and timing rules, and reading the panel's confirmation events back on the TX
+  side. Experiments happen on a spare panel, or with the protected panel's bus disconnected, never while
+  the house relies on that panel for protection.
+
+### Validation tests
+
+| ID | Title | Layer | Step | Pass criteria | Status |
+|---|---|---|---|---|---|
+| T9.1 | Arm and disarm are decoded from the live bus | device | Note the baseline event log, arm at the keypad, wait out the exit delay, disarm, then diff `/api/events`. | The arm and disarm frames appear with EventId and category recorded, and the category's meaning is written down or explicitly marked unknown. |
+| T9.2 | Partition arming state in the model | host-unit | Feed arm, disarm, disarm-after-alarm and cancel frames through the state model; snapshot, restore, snapshot. | Partition fields follow the events; a category the model does not understand is reported rather than guessed; restore reproduces the snapshot exactly. |
+| T9.3 | Dashboard reports arming state | device | Watch the dashboard across an arm and a disarm at the keypad, then reboot the module and look again. | The state follows the panel event within about 2 s; after a reboot the dashboard says arming state is unknown until the next event instead of showing a stale value. |
+| T9.4 | HomeKit surface decision recorded | manual | Check what Home can show for a partition without a writable TargetSecurityState. | A written decision with the reason, and the alternative surfaces named. |
+| T9.5 | Captured keypad frames decode with the existing decoder | device | Capture RX-side frames for arm, disarm and cancel from a keypad session, then run them through the host decoder. | Every captured frame decodes to named fields, or the bytes that do not decode are recorded as an open framing question. No TX involved. |
+| T9.6 | The control plane refuses strangers | security | With network control off, request an arm; try the default password; try an operator credential against config-write endpoints. | Control refused with a clear 4xx while the opt-in is off; default password refused; an operator credential cannot write config; each attempt recorded. |
+| T9.7 | A bridge-initiated arm is confirmed by the panel | device | On a bench panel, send the captured arm frame and watch the panel's own TX-side events. | The panel's Arm event appears on the TX side within about 2 s; a wrong code produces the panel's reject event and the bridge reports it; the panel returns to its previous state. |
+
+---
+
 ## Dependency graph
 
 Arrows point from a prerequisite to the work item that needs it. Items with no incoming arrow can start immediately.
@@ -673,6 +735,14 @@ graph LR
     n_homekit_verify["homekit-verify"]
     n_panel_traffic_gap["panel-traffic-gap"]
     n_sdkconfig_cleanup["sdkconfig-cleanup"]
+  end
+  subgraph sg_M9["M9: Panel control direction"]
+    n_arm_state_observe["arm-state-observe"]
+    n_arm_state_model["arm-state-model"]
+    n_hk_arming_surface["hk-arming-surface"]
+    n_rx_bus_capture["rx-bus-capture"]
+    n_control_plane_auth["control-plane-auth"]
+    n_panel_write_path["panel-write-path"]
   end
   n_event_decode --> n_api_events_log
   n_test_harness --> n_api_events_log
@@ -720,6 +790,16 @@ graph LR
   n_panel_debug --> n_web_ui
   n_event_decode --> n_zone_state_model
   n_test_harness --> n_zone_state_model
+  n_uart_framing --> n_arm_state_observe
+  n_event_decode --> n_arm_state_observe
+  n_arm_state_observe --> n_arm_state_model
+  n_zone_state_model --> n_arm_state_model
+  n_arm_state_model --> n_hk_arming_surface
+  n_panel_debug --> n_rx_bus_capture
+  n_rx_bus_capture --> n_panel_write_path
+  n_control_plane_auth --> n_panel_write_path
+  n_web_auth --> n_control_plane_auth
+  n_web_server_core --> n_control_plane_auth
 ```
 
 ---
@@ -729,8 +809,8 @@ graph LR
 | Kind | Count | What it needs |
 |---|---|---|
 | build | 6 | idf.py build / sdkconfig inspection only |
-| device | 22 | board on `/dev/ttyUSB0` + serial capture |
-| host-unit | 11 | host toolchain only (`make -C test/host test`) — no hardware |
-| manual | 5 | a phone on the bridge network |
+| device | 26 | board on `/dev/ttyUSB0` + serial capture |
+| host-unit | 12 | host toolchain only (`make -C test/host test`) — no hardware |
+| manual | 6 | a phone on the bridge network |
 | manual-homekit | 2 | iPhone with the Home app and a paired bridge |
-| security | 8 | board + `curl`, plus a `strings` scan of the image |
+| security | 9 | board + `curl`, plus a `strings` scan of the image |
