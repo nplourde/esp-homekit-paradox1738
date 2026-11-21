@@ -268,6 +268,32 @@ def cases(host="192.0.2.1"):
          "application/json", ok_origin, 405),
         ("POST events/clear no session", "POST", "/api/events/clear", body("{}"),
          "application/json", ok_origin, 401),
+
+        # POST /api/homekit/restart is the one endpoint that reboots the module on
+        # purpose, so every case here is a refusal, and the point is not the status
+        # code alone: the uptime check at the end of the run is what proves none of
+        # these requests restarted anything. The cross-origin case is the CSRF one -
+        # without the same-origin guard, any page open in the user's browser could
+        # drop the whole house's HomeKit sessions for a few seconds. The confirm cases
+        # pin the second step: an absent, false or non-boolean confirm must not be
+        # read as consent. The compared zone-configuration bytes also carry
+        # reboot_required_for_homekit, so a restart would show up there too.
+        ("POST restart homekit no session", "POST", "/api/homekit/restart",
+         body('{"confirm":true}'), "application/json", ok_origin, 401),
+        ("POST restart homekit cross-origin", "POST", "/api/homekit/restart",
+         body('{"confirm":true}'), "application/json", bad_origin, 403),
+        ("GET restart homekit wrong method", "GET", "/api/homekit/restart", None,
+         None, ok_origin, 405),
+        ("POST restart homekit empty object", "POST", "/api/homekit/restart",
+         body("{}"), "application/json", ok_origin, 400),
+        ("POST restart homekit confirm false", "POST", "/api/homekit/restart",
+         body('{"confirm":false}'), "application/json", ok_origin, 400),
+        ("POST restart homekit confirm string", "POST", "/api/homekit/restart",
+         body('{"confirm":"yes"}'), "application/json", ok_origin, 400),
+        ("POST restart homekit empty body", "POST", "/api/homekit/restart",
+         body(""), "application/json", ok_origin, 400),
+        ("POST restart homekit no Content-Type", "POST", "/api/homekit/restart",
+         body('{"confirm":true}'), None, ok_origin, 415),
     ]
 
 
@@ -310,6 +336,18 @@ def run(args):
             failures.append("%s: expected %d, got %d (%s)"
                             % (label, expected, status, text[:60]))
             verdict = "  <<< unexpected status"
+        elif text.startswith("{"):
+            # Anything that answers with an object has to answer with a parsable one.
+            # send_error() interpolates its message straight into JSON without escaping
+            # it, so a message containing a double quote ships an unparsable body: the
+            # first version of the bridge-restart message did exactly that, and only
+            # this check would have caught it had the status not also been wrong.
+            try:
+                json.loads(text)
+            except ValueError as error:
+                failures.append("%s: %d answered a body that is not valid JSON (%s): %s"
+                                % (label, status, error, text[:60]))
+                verdict = "  <<< body is not valid JSON"
         print("%-34s %-4s %s%s" % (label, status, text[:58].replace("\n", " "),
                                    verdict))
         before = after
@@ -365,6 +403,15 @@ def self_test():
         json.dumps({"zones": [{"name": "Cuisine"}]})
     assert json.dumps({"zones": [{"name": "Cuisine"}]}) != \
         json.dumps({"zones": [{"name": "Cuisin"}]})
+    # An error message carrying a double quote is interpolated raw into the JSON body,
+    # which is why every object-shaped response in the battery has to parse.
+    unparsable = '{"error":"Restart requires {"confirm":true}"}'
+    try:
+        json.loads(unparsable)
+        raise AssertionError("the tool must treat that body as invalid: %s" % unparsable)
+    except ValueError:
+        pass
+    assert json.loads('{"error":"Body must set confirm true"}')
     # The battery must actually contain the regression case.
     labels = [case[0] for case in cases()]
     assert "PUT truncated object" in labels, labels
@@ -374,18 +421,24 @@ def self_test():
         "PUT origin has no scheme" in labels, labels
     assert "PUT deeply nested" in labels and "PUT deeply nested strings" in labels, \
         labels
+    # The reboot-on-purpose endpoint must keep its refusal cases: losing them would
+    # turn the battery into a way to restart the module by accident.
+    assert "POST restart homekit cross-origin" in labels and \
+        "POST restart homekit confirm false" in labels and \
+        "POST restart homekit confirm string" in labels and \
+        "POST restart homekit no session" in labels, labels
     assert len(labels) == len(set(labels)), "case labels must be unique"
     # A case that is meant to be anonymous must actually be sent without a
     # session, or a successful write looks like an authentication failure.
     anonymous = anonymous_case_labels()
-    assert len(anonymous) == 14, sorted(anonymous)
+    assert len(anonymous) == 15, sorted(anonymous)
     assert "GET system no session" in anonymous and \
         "GET health no session" in anonymous, sorted(anonymous)
     assert "POST logout" not in anonymous, "the logout request needs a session"
     print("robustness self-test: PASS (%d cases, %d of them anonymous; detects "
           "rebooting uptime, unexpected status, unanswered requests, changed "
-          "configuration; the truncated-body and deep-nesting regression cases "
-          "are present)" % (len(labels), len(anonymous)))
+          "configuration; the truncated-body, deep-nesting and bridge-restart "
+          "refusal cases are present)" % (len(labels), len(anonymous)))
     return 0
 
 

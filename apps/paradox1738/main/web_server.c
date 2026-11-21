@@ -82,7 +82,7 @@ static const char *INDEX_HTML =
     "<section data-panel=\"zones\" class=\"hidden\"><h2>Zone configuration</h2>"
     "<p class=\"muted\">Changes are saved immediately. HomeKit applies them after a reboot.</p>"
     "<p id=\"homekit-pending\" class=\"warn hidden\">HomeKit is still showing the accessory names and "
-    "types from before the last change. Restart the bridge to apply them.</p>"
+    "types from before the last change. <button id=\"restart-homekit\">Restart the bridge now</button></p>"
     "<div id=\"zone-list\" class=\"grid\"></div></section>"
     "<section data-panel=\"events\" class=\"hidden\"><h2>Panel events</h2>"
     "<button id=\"refresh-events\">Refresh</button> <button id=\"clear-events\">Clear log</button>"
@@ -187,6 +187,15 @@ static const char *INDEX_HTML =
     "$('#ota-form').onsubmit=async e=>{e.preventDefault();const file=$('#firmware').files[0];if(!file)return;"
     "if(!confirm(`Upload ${file.name} (${file.size} bytes) and restart the device?`))return;"
     "try{msg.textContent='Uploading firmware…';await request('/api/ota',{method:'POST',headers:{'Content-Type':'application/octet-stream'},body:file});msg.textContent='Firmware accepted; device restarting.'}catch(x){showError(x)}};"
+    "const waitForBridgeBack=async()=>{for(let i=0;i<90;i++){try{const r=await fetch('/api/health');if(r.ok){location.reload();return}}catch{}"
+    "await new Promise(r=>setTimeout(r,1000))}msg.textContent='The device has not come back within 90 s; check its address and reload.'};"
+    "$('#restart-homekit').onclick=async()=>{if(!confirm('Restart the bridge now? Every HomeKit controller - Apple Home, hubs and automations - loses its session for several seconds, and sensors answer no response meanwhile.'))return;"
+    "const button=$('#restart-homekit');button.disabled=true;msg.textContent='Restarting the bridge; HomeKit is unreachable for a few seconds.';"
+    "sessionStorage.setItem('bridge-restarted','1');"
+    "try{await request('/api/homekit/restart',jsonOptions('POST',{confirm:true}))}catch(e){button.disabled=false;showError(e);return}"
+    "await waitForBridgeBack()};"
+    "if(sessionStorage.getItem('bridge-restarted')){sessionStorage.removeItem('bridge-restarted');"
+    "msg.textContent='Bridge restarted, and the accessory database was rebuilt. Sign in again to continue.'}"
     "const resume=async()=>{try{const a=await request('/api/auth/status');if(a.authenticated){$('#login-box').classList.add('hidden');"
     "$('#app').classList.remove('hidden');await initialize()}}catch{}};resume();"
     "</script></html>";
@@ -330,11 +339,20 @@ static esp_err_t send_error(httpd_req_t *request, const char *status,
 {
     httpd_resp_set_hdr(request, "Connection", "close");
     httpd_resp_set_status(request, status);
-    char body[96];
+    /* Two ways this used to turn a caller's correct 4xx into a misleading 500: a
+     * message longer than the buffer, and a message carrying a double quote, which
+     * lands raw inside the JSON and makes the body unparsable. Messages are kept
+     * short and quote-free for that reason; the size check and the fallback below
+     * are what make an oversight visible instead of silent. */
+    char body[160];
     int length = snprintf(body, sizeof(body), "{\"error\":\"%s\"}", message);
     if (length < 0 || (size_t)length >= sizeof(body)) {
-        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                   "Internal Server Error");
+        ESP_LOGE(TAG, "Error message for %s does not fit the body buffer (%d bytes); "
+                      "sending the status with no body",
+                 status, length);
+        /* Keep the status the caller chose. Reporting 500 for a client's bad request
+         * hides the finding and points the next reader at the server. */
+        return httpd_resp_send(request, NULL, 0);
     }
     return send_json(request, body);
 }
@@ -1792,6 +1810,72 @@ static esp_err_t ota_upload_handler(httpd_req_t *request)
     return response_err;
 }
 
+/* Restart the process so a zone rename or type change reaches HomeKit.
+ *
+ * There is no in-place alternative, and that is the SDK's own statement rather than
+ * an assumption: hap_stop() and hap_deinit() are both documented "This currently does
+ * not do anything", hap_service_add_characteristic() says characteristics may be added
+ * only "before hap_start()", and this bridge builds its accessories once in
+ * hub_task_entry() before hap_start(). Nothing in the vendored esp-hap frees or
+ * replaces an accessory, and silently reusing an AID with a different service type
+ * would corrupt what paired controllers already believe. So rebuilding the accessory
+ * database means starting the process again, which is what the pending banner has
+ * always told a person to do - through an action they could not take.
+ *
+ * The pairing survives: keys live in NVS, and every OTA in this module's log has
+ * rebooted it with the pairing intact (mDNS keeps answering _hap._tcp with sf=0).
+ *
+ * The confirmation body is not ceremony. This drops every HomeKit controller's
+ * session for several seconds, which the house experiences as sensors briefly
+ * answering "no response". A single misdirected click should not be able to cause
+ * that, so the caller has to say so explicitly. */
+static esp_err_t homekit_restart_handler(httpd_req_t *request)
+{
+    if (!request_is_authorized(request)) {
+        return ESP_OK;
+    }
+    cJSON *json = NULL;
+    if (receive_json(request, &json) != ESP_OK) {
+        return ESP_OK;
+    }
+    bool confirmed = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(json, "confirm"));
+    bool pending = s_homekit_pending;
+    delete_json_strings(json);
+    if (!confirmed) {
+        ESP_LOGI(TAG, "HomeKit bridge restart refused: confirm was not set true "
+                      "(pending changes: %s)", pending ? "yes" : "no");
+        return send_error(request, "400 Bad Request",
+                          "Body must set confirm true; the restart drops every "
+                          "HomeKit session briefly");
+    }
+    /* Logged before the restart rather than after, because the boot log of the new
+     * process has no way to say who asked or why. */
+    ESP_LOGW(TAG, "Restarting for HomeKit accessory changes (pending: %s)",
+             pending ? "yes" : "no");
+    char body[96];
+    int length = snprintf(body, sizeof(body),
+                          "{\"ok\":true,\"restarting\":true,\"pending\":%s}",
+                          pending ? "true" : "false");
+    if (length < 0 || (size_t)length >= sizeof(body)) {
+        return send_error(request, "500 Internal Server Error",
+                          "Restart status unavailable");
+    }
+    esp_err_t response_err = httpd_resp_set_status(request, "202 Accepted");
+    if (response_err == ESP_OK) {
+        response_err = send_json(request, body);
+    }
+    if (response_err != ESP_OK) {
+        ESP_LOGW(TAG, "Restart response failed before HomeKit bridge restart: %s",
+                 esp_err_to_name(response_err));
+    }
+    /* Same grace the OTA path uses, and for the same reason: esp_restart() from inside
+     * a request handler kills the socket, so the response has to be on the wire and the
+     * client has to have had a chance to read it. */
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    return response_err;
+}
+
 static esp_err_t auth_status_handler(httpd_req_t *request)
 {
     char body[96];
@@ -2102,6 +2186,8 @@ esp_err_t web_server_start(paradox_config_t *config)
          .handler = debug_homekit_handler},
         {.uri = "/api/debug/raw/stream", .method = HTTP_GET,
          .handler = debug_raw_stream_handler},
+        {.uri = "/api/homekit/restart", .method = HTTP_POST,
+         .handler = homekit_restart_handler},
     };
     /* Compile time, because the failure at run time is not a degraded page: it is a
      * dead web server. HomeKit keeps working through it, which is what makes the

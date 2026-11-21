@@ -80,10 +80,11 @@ make consistency HOST=<address> # check the HomeKit database against GET /api/st
   measures the delay from decoding a panel frame to publishing it using stamps the
   device puts in its own payloads. Needs real panel traffic; `--self-test` checks
   the maths.
-- `test/device/robustness.sh` (`make robust`) — replays 54 malformed, unauthorized
+- `test/device/robustness.sh` (`make robust`) — replays 62 malformed, unauthorized
   and cross-origin requests at a running module and fails if any is accepted, if the
-  zone configuration changes by a byte, if a request goes unanswered, or if the
-  module's uptime goes backwards. `--self-test` checks the case list.
+  zone configuration changes by a byte, if a request goes unanswered, if the module's
+  uptime goes backwards, or if an object-shaped response body does not parse as JSON.
+  `--self-test` checks the case list.
 - `test/device/homekit_timeline.py` (`make timeline`) — for the checks that only a
   person can finish: it holds the authenticated status stream open and writes one CSV
   row whenever anything HomeKit mirrors changes (zone open, alarm, tamper, bypass, fire),
@@ -225,6 +226,7 @@ change, and logout are under `/api/auth/`. Authenticated API endpoints:
 |---|---|
 | `GET /api/zones` | All configured zones plus live state |
 | `PUT /api/zones/{1..16}` | Update a zone's `name`, `type` (`contact`, `motion`, `smoke`, `leak`), and/or `enabled`; response reports `reboot_required_for_homekit` |
+| `POST /api/homekit/restart` | Restart the process so pending zone names and types reach HomeKit; requires body `{"confirm":true}` and answers `202` before rebooting |
 | `GET /api/status` | Current zone and fire state snapshot, plus `pushed_ms`: the device time the snapshot was produced |
 | `GET /api/status/stream` | Server-sent status updates |
 | `GET /api/events?class=zone&zone=1&limit=32` | Recent decoded events, newest first; class, zone, and limit filters are optional |
@@ -345,6 +347,16 @@ place. While such a change is pending, `GET /api/zones` reports
 `reboot_required_for_homekit: true` and the Zones tab shows a banner saying so;
 that flag goes back to false only when the bridge restarts, which is the moment
 HomeKit stops being stale.
+The banner carries the button that takes the action: `POST /api/homekit/restart`
+restarting the process, since the vendored esp-hap documents `hap_stop()` and
+`hap_deinit()` as no-ops and only allows characteristics to be added before
+`hap_start()`. The endpoint requires `{"confirm":true}` in the body, because the
+restart drops every HomeKit controller's session for several seconds and sensors
+answer "no response" meanwhile; the page warns you first, then waits for the
+device to answer `/api/health` again and reloads. Pairing is not at risk - the keys
+live in NVS, and `mDNS` keeps answering `_hap._tcp` with `sf=0` (paired and idle)
+across the restart. The `robustness` battery keeps the refusals pinned: no session,
+cross-origin, wrong method, and every way of not saying confirm.
 The authenticated Debug tab can run a short recorded-frame replay through the
 normal decoder, state, and HomeKit paths. Live UART reads pause during the
 replay, buffered panel traffic is processed afterward, and the previous HomeKit

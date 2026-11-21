@@ -25,7 +25,7 @@ Every milestone lists the work items it contains **and** the tests that must pas
 | M4 | Custom SoftAP provisioning (dropped; keep stock ESP-IDF BLE) | 0 | 6 | [-] |
 | M5 | Authenticated web server | 2 | 9 | [~] |
 | M6 | Web APIs for config, status, log, debug | 4 | 8 | [x] |
-| M7 | Web UI and firmware update | 3 | 7 | [~] |
+| M7 | Web UI and firmware update | 3 | 8 | [~] |
 | M8 | Integrated release on real hardware | 5 | 7 | [~] |
 | M9 | Panel control direction - observe, capture, then write | 6 | 7 | [ ] |
 
@@ -40,14 +40,6 @@ open and can genuinely start with nothing waiting on it:
 - [ ] `power-cycle` (M8) - needs someone at the wall socket
 - Partial, waiting on a person rather than on code: `docs-wiring` (M8), `homekit-verify` (M8),
   T3.5 bypass in Home, T3.6 StatusActive/StatusTampered, T7.2 edits driven through the browser
-- Blocked as written, with a way around it: T6.5 wanted a comparison against HAP
-  `GET /accessories`, which answers 470 without a verified controller session. Closed by reading
-  the values from the esp-hap accessory database on the device and serving them at
-  `GET /api/debug/homekit`; see T6.5.
-- [ ] `homekit-restart-control` (M7) - the UI cannot restart the bridge. The only restart in
-  the firmware is the one `POST /api/ota` performs after validating an image, so the Zones tab
-  banner that says a restart is needed before a rename reaches HomeKit is an instruction a
-  browser cannot obey. T7.2 needs this to be finishable from the browser.
 - Waiting on a decision about hardware risk: T8.5 as written shorts the UART to 5 V, which can
   destroy the board. Proposed instead: measure and document the panel's signalling level.
 
@@ -531,17 +523,26 @@ A phone-usable single-page UI covering setup, zones, live status, logs and debug
   name/type/enabled, live status dashboard showing all 16 zones + fire, event log, and panel
   debug. Wi-Fi credentials are entered through ESP-IDF's stock BLE provisioning flow, not the web UI.
   *Depends on:* `api-events-log`, `api-live-status`, `api-zone-config`, `panel-debug`
-- [ ] `homekit-restart-control` — Restarting the bridge after a zone edit, from the browser
+- [x] `homekit-restart-control` — Restarting the bridge after a zone edit, from the browser
   The zone editor says a rename or type change reaches HomeKit only after the bridge restarts,
   the Zones tab shows a banner saying so, and `reboot_required_for_homekit` reports it - but a
-  browser has no way to obey, because the only restart in the firmware is the one
-  `POST /api/ota` performs after validating an uploaded image. So today the documented remedy
-  for a stale HomeKit name is an action the UI cannot take. Needs an authenticated,
-  same-origin-guarded control whose effect is visible: the page must know the module went away
-  and came back, and the pending flag must clear. Rebuilding the accessory database in place is
-  worth investigating before writing a restart button, because it would not drop the Wi-Fi or
-  HomeKit sessions and would let the pending state resolve itself. T7.2 cannot finish from the
-  browser until this exists.
+  browser had no way to obey, because the only restart in the firmware was the one
+  `POST /api/ota` performs after validating an uploaded image. So the documented remedy for a
+  stale HomeKit name was an action the UI could not take.
+  Rebuilding the accessory database in place was investigated first and is not available: the
+  vendored esp-hap documents `hap_stop()` and `hap_deinit()` as "This currently does not do
+  anything", `hap_service_add_characteristic()` says characteristics may be added only "before
+  hap_start()", and this bridge builds its accessories once in `hub_task_entry()` before
+  `hap_start()`. Nothing in the SDK frees or replaces an accessory, and quietly reusing an AID
+  for a different service type would corrupt what paired controllers already believe about the
+  accessory. So the supported route is the one the banner already described: start the process
+  again. `POST /api/homekit/restart` does that, authenticated and same-origin like every other
+  write, and requires `{"confirm":true}` in the body because the restart drops every HomeKit
+  controller's session for several seconds - the house sees sensors answering "no response" in
+  that window, so one misdirected click should not cause it. The Zones banner now carries the
+  button; the page warns, posts, waits for `/api/health` to answer again and reloads, and leaves
+  a note in place of the sign-in the restart invalidated. The request is logged before the
+  restart, because the new process has no way to say who asked or why.
   *Depends on:* `api-zone-config`, `web-auth`, `web-ui`
 
 ### Validation tests
@@ -555,6 +556,8 @@ A phone-usable single-page UI covering setup, zones, live status, logs and debug
 | T7.5 | Oversized or corrupt firmware is refused | device | Upload a truncated image, a wrong-arch image, and an image larger than the ota partition. | All three rejected with a clear error before the boot partition changes; the device still boots the old firmware; no bricked state. | [x] PASS: truncated and wrong-chip images returned 400; oversized image returned 413; active slot remained bootable |
 | T7.6 | Rollback on a bad update | device | Upload an image that boots but crashes before reporting validity, then power-cycle. | Bootloader or esp_ota_ops roll back to the previous slot (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE) and the device is reachable again without reflashing. | [x] PASS: test image rebooted while pending; bootloader returned to ota_1 and health endpoint returned 200 |
 | T7.7 | OTA size budget respected | build | Record idf.py size output and the .bin size against the 1600K partition after adding the web server and UI assets. | paradox1738.bin stays under 1500 KB (at least 100 KB headroom); if not, either shrink UI assets or propose a new partition table in the docs before merging. | [x] PASS: 1,389,344 bytes (about 143 KiB below 1500 KiB) |
+
+| T7.8 | Restarting the bridge applies pending zone edits to HomeKit | device | Rename a zone through `PUT /api/zones/{n}`, check that the accessory database still reports the old name, call `POST /api/homekit/restart` with `confirm:true`, then re-read both views and the pairing advertisement. | The unconfirmed, unauthorized and cross-origin forms are refused (400/401/403/405) and none of them reboots the module; the confirmed call answers 202, the module returns with fresh uptime, `reboot_required_for_homekit` is false again, `GET /api/debug/homekit` reports the new accessory name, and mDNS still advertises `_hap._tcp` with `sf=0`. | [x] PASS on the bench board, flashed with `app-flash` so NVS and pairing were untouched (the boot log shows Pair Verify succeeding immediately after the flash). Before any edit, both views called zone 16 `Zone 16`. After `PUT /api/zones/16 {"name":"Restart Rebuilds Database"}`: the state model said the new name, `GET /api/debug/homekit` still said `Zone 16`, and `reboot_required_for_homekit` was true - the running bridge really is stale, so the pending flag is not decorative. `POST /api/homekit/restart {"confirm":true}` answered `202 {"ok":true,"restarting":true,"pending":true}`; the module came back with uptime 35 977 ms, both views said `Restart Rebuilds Database`, and the flag was false: the restart rebuilt the accessory database, which is the whole claim. Restoring `Zone 16` and restarting again settled both views back with the flag false, so the control is repeatable rather than one-shot. mDNS after the two restarts: four `_hap._tcp` records, every one `sf=0`, so the pairing survived. The refusals come from `make robust` (62 cases): the confirmed body sent without a session (401), from a foreign origin (403), under GET (405), and then `{}`, `{"confirm":false}`, `{"confirm":"yes"}`, an empty body and no Content-Type (400, 400, 400, 400, 415) - and uptime never moved backwards across the battery, which is what proves those refusals were real rather than a reboot with a fast recovery. The compared zone-configuration bytes also carry the pending flag, so a reboot would be caught twice. Writing the handler exposed a trap in `send_error()`: the body buffer was 96 bytes and the message is interpolated without escaping, so a message carrying a double quote produced an unparsable JSON body and a message that did not fit was reported to the client as a 500 for its own bad request. Both fixed - 160-byte buffer, a log line naming the overflow, and the caller's chosen status kept with an empty body instead of being replaced by 500 - and the battery now rejects any object-shaped response body that does not parse, which is what flagged the invalid JSON alongside the wrong status. |
 
 ---
 
