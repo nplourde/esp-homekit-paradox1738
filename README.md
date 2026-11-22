@@ -62,6 +62,7 @@ make robust HOST=<address>    # malformed and unauthorized requests against a mo
 make timeline HOST=<address>  # record what the bridge publishes while you trigger zones
 make consistency HOST=<address> # check the HomeKit database against GET /api/status
 make audit HOST=<address> PHASE=boot # read what the bridge recorded about its own requests
+make ui-selftest HOST=<address> # run the page's own JavaScript against a fake DOM
 ```
 
 - `test/host/` — Unity unit tests for pure logic, compiled with the host `gcc`
@@ -120,6 +121,13 @@ make audit HOST=<address> PHASE=boot # read what the bridge recorded about its o
   and asking `request_is_authorized()` who the principal was turned out to answer the request with a
   401 or 403 on the way to saying no - a defect the host suite could not see and the on-device battery
   caught on its first run.
+- `test/device/web_ui_dom.mjs` (`make ui-selftest HOST=<address>`) — runs the JavaScript the device
+  is actually serving against a small fake DOM with a fake `fetch`, and asserts what the zone editor
+  is supposed to do: one save action writes every zone that differs, a zone the device refused stays
+  marked unsaved, switching tabs does not throw away typed edits, a refresh with edits in progress
+  warns, and no zone row carries a save button of its own. It fetches the page rather than a copy of
+  the source, so a broken C string escape shows up here. It needs `node`, which is why it is not part
+  of `make check` - that has to stay runnable with gcc, python3 and idf.py alone.
 - Request bodies are bounded before the JSON parser sees them: 512 bytes, and at
   most eight levels of nested containers (`test/host/test_json_guard.c` covers the
   counting, including brackets that sit inside strings). cJSON recurses once per
@@ -375,6 +383,13 @@ place. While such a change is pending, `GET /api/zones` reports
 `reboot_required_for_homekit: true` and the Zones tab shows a banner saying so;
 that flag goes back to false only when the bridge restarts, which is the moment
 HomeKit stops being stale.
+The zone editor keeps edits on the page until you save them, and one save button
+writes every zone you changed - there used to be a button per zone, which meant six
+round trips to rename six zones and a page that could hold a mix of saved and
+unsaved zones without saying which was which. The page remembers what the device last
+accepted for every field, so it can name the zones that differ, keep a refused zone
+marked unsaved instead of letting it look saved, and leave your typing alone when you
+switch tabs.
 The banner carries the button that takes the action: `POST /api/homekit/restart`
 restarting the process, since the vendored esp-hap documents `hap_stop()` and
 `hap_deinit()` as no-ops and only allows characteristics to be added before

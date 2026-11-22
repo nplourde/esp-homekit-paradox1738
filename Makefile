@@ -24,6 +24,8 @@
 #                     accessory database (T6.5); HOST= required, SAMPLES= to repeat
 #   make audit        # read the bridge's record of what it was asked to do (T9.6);
 #                     HOST= and PHASE=boot|write|refusals|restart are required
+#   make ui-selftest  # run the page's own JavaScript against a fake DOM (needs node,
+#                     and a device to fetch the page from); HOST= required
 
 APP          := apps/paradox1738
 HOST_TEST_DIR := test/host
@@ -39,7 +41,7 @@ PHASE        ?= boot
 # IDF_PATH must be exported for idf.py; point it at the local checkout.
 export IDF_PATH ?= $(HOME)/Source/esp-idf
 
-.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest timeline timeline-selftest consistency consistency-selftest audit clean distclean
+.PHONY: check check-fail host-test build build-sim build-selftest build-configtest flash monitor smoke smoke-selftest soak soak-selftest latency latency-selftest robust robust-selftest timeline timeline-selftest consistency consistency-selftest audit ui-selftest clean distclean
 
 check: host-test smoke-selftest soak-selftest latency-selftest robust-selftest \
 	timeline-selftest consistency-selftest build build-sim
@@ -169,6 +171,14 @@ audit:
 	@test -n "$(HOST)" || { echo "audit: HOST=<device address> is required"; exit 2; }
 	@test -n "$(PHASE)" || { echo "audit: PHASE=boot|write|refusals|restart is required"; exit 2; }
 	@./test/device/audit_trail.py --host "$(HOST)" --phase "$(PHASE)"
+
+# Deliberately not part of `check`: it needs node, and check must stay runnable with
+# gcc, python3 and idf.py alone. It also fetches the page from a running device, since
+# checking the C string escaping means checking what the device actually serves.
+ui-selftest:
+	@test -n "$(HOST)" || { echo "ui-selftest: HOST=<device address> is required"; exit 2; }
+	@command -v node >/dev/null || { echo "ui-selftest: needs node on PATH - that is why it is not part of make check"; exit 3; }
+	@node ./test/device/web_ui_dom.mjs "$(HOST)"
 
 clean:
 	@$(MAKE) -C $(HOST_TEST_DIR) clean
